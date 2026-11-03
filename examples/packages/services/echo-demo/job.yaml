@@ -1,0 +1,21 @@
+# A service with no dependencies: proves the streaming request path.
+#
+#   scripts\pc.ps1 run examples\packages\services\echo-demo
+#   scripts\pc.ps1 services
+#   scripts\pc.ps1 call echo-demo some-file.bin --follow
+#   scripts\pc.ps1 call echo-demo --text "hello" --param upper=true
+#   scripts\pc.ps1 service stop echo-demo
+#
+# The job keeps running (one slot on the device that hosts it) until stopped.
+name: "service: echo-demo"
+type: service
+params:
+  name: echo-demo
+  description: counts bytes as they stream in, returns stats (no model needed)
+  code: "@service.py"
+  accepts: any file or text
+  produces: json
+  streaming_output: true
+  request_timeout: 120
+options:
+  targets: any        # or "all" for one instance per device, or [<device id>]

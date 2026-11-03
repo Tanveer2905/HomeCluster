@@ -1,0 +1,20 @@
+# Image classification template. As shipped it uses Pillow to describe the
+# image (size, mode, dominant colour) so the plumbing can be tried on any
+# phone; drop a real model into service.py (TFLite / ONNX Runtime both have
+# aarch64 wheels that install in Termux) and return its labels instead.
+#
+#   scripts\pc.ps1 run examples\packages\services\image-classify
+#   scripts\pc.ps1 call image-describe photo.jpg
+name: "service: image-describe"
+type: service
+params:
+  name: image-describe
+  description: describes an image (template for a real classifier)
+  code: "@service.py"
+  setup_cmd: python -c "import PIL" 2>/dev/null || pip install pillow
+  accepts: image/*
+  produces: json
+  request_timeout: 120
+  params:
+    top_k: 3
+  # inputs: "@model.tflite"      # ship model weights with the job; see ctx.inputs

@@ -1,0 +1,18 @@
+# Word count over every .txt in texts/, one task per file.
+#
+#   scripts\pc.ps1 run examples\packages\wordcount --wait
+#
+# "@path" is resolved by the plugin's param type:
+#   code   -> the file's text is inlined
+#   inputs -> every match is uploaded and replaced by its file id
+#   items  -> parsed JSON (here: which input index each task should read)
+name: wordcount package
+type: python_map
+params:
+  code: "@count.py"
+  fn_name: count_words
+  inputs: "@texts/*.txt"
+  items: "@items.json"
+  chunk_size: 1
+options:
+  timeout: 120

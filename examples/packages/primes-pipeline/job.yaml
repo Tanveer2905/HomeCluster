@@ -1,0 +1,22 @@
+# A two-step pipeline in one package: count primes, then format the answer.
+#
+#   scripts\pc.ps1 run examples\packages\primes-pipeline --wait
+#
+# Step "report" waits for "count" and reads its result through $from_job.
+name: primes pipeline package
+jobs:
+  - key: count
+    type: prime_range
+    params:
+      start: 1
+      end: 2000000
+      chunk_size: 200000
+
+  - key: report
+    type: python_map
+    depends_on: [count]
+    params:
+      code: "@report.py"
+      fn_name: describe
+      items:
+        - { $from_job: count, path: count }

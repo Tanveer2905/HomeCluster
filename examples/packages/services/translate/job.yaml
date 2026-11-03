@@ -1,0 +1,18 @@
+# Translation service template. Shipped with a tiny dictionary "model" so it
+# runs anywhere; replace service.py's load()/serve() with a real engine such
+# as Argos Translate (pip install argostranslate, offline language packs) and
+# keep the same request shape: text in, {"text": ...} out.
+#
+#   scripts\pc.ps1 run examples\packages\services\translate
+#   scripts\pc.ps1 call translate-demo --text "good morning friend" --param to=es
+name: "service: translate-demo"
+type: service
+params:
+  name: translate-demo
+  description: word-by-word demo translator (template for Argos / MarianMT)
+  code: "@service.py"
+  accepts: text (or JSON {"text": ..., "to": "es"})
+  produces: json
+  request_timeout: 60
+  params:
+    default_to: es

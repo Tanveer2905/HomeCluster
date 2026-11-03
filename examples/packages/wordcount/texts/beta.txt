@@ -1,0 +1,3 @@
+Phones idle in a drawer are still computers. Give them a job and they will
+poll the coordinator, download this file, count its words and post the
+result back, even if the coordinator disappears for a while in between.

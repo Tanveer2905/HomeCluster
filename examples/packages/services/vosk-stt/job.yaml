@@ -1,0 +1,30 @@
+# Speech-to-text with Vosk, hosted on one phone (e.g. the Redmi Note 10) and
+# callable from any device, including a Samsung J2 running only a browser.
+#
+# One-time on the hosting phone (Termux):  pkg install python; the job's
+# setup_cmd runs `pip install vosk` for you (needs internet on the phone once;
+# the aarch64 wheel is ~5 MB). The small English model (~40 MB) is downloaded
+# on first start into the worker's service folder unless you give it as an
+# input file.
+#
+#   scripts\pc.ps1 run examples\packages\services\vosk-stt           # any capable device
+#   scripts\pc.ps1 call vosk-en recording.wav --follow               # 16 kHz mono PCM WAV
+#   scripts\pc.ps1 call vosk-en recording.wav --param sample_rate=44100   # other rates
+#
+# Pin it to a specific phone with:   options: { targets: ["<device id>"] }
+name: "service: vosk-en"
+type: service
+params:
+  name: vosk-en
+  description: offline speech-to-text (Vosk small English model)
+  code: "@service.py"
+  setup_cmd: python -c "import vosk" 2>/dev/null || pip install vosk
+  accepts: audio/wav (16 kHz mono PCM; other WAV rates handled per request)
+  produces: text
+  streaming_output: true
+  request_timeout: 600
+  # Optional: ship the model zip with the job instead of downloading it on the phone:
+  # inputs: "@vosk-model-small-en-us-0.15.zip"
+  params:
+    model_url: https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+    model_dirname: vosk-model-small-en-us-0.15

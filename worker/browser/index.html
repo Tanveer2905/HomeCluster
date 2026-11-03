@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>PhoneCluster worker</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/w/style.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="bar">
+    <div class="brand">
+      <span class="dot" id="dot"></span>
+      <strong>PhoneCluster</strong>
+    </div>
+    <div class="state" id="state">starting</div>
+  </header>
+
+  <section class="card" id="joinCard" hidden>
+    <h2>Join the cluster</h2>
+    <p class="muted">Scan the code on the PC's Join page, or type the one-time join code shown there.</p>
+    <label for="codeInput">Join code</label>
+    <input id="codeInput" type="text" autocapitalize="characters" autocomplete="one-time-code"
+           spellcheck="false" maxlength="12" placeholder="ABCD-EFGH">
+    <label for="nameInput">Device name</label>
+    <input id="nameInput" type="text" maxlength="40" placeholder="my phone">
+    <button class="primary" id="joinBtn">Join</button>
+    <p class="error" id="joinError" hidden></p>
+  </section>
+
+  <section class="card" id="mainCard" hidden>
+    <div class="row name-row">
+      <div>
+        <div class="label">device</div>
+        <div class="value" id="deviceName">-</div>
+      </div>
+      <button class="ghost" id="renameBtn">Rename</button>
+    </div>
+
+    <div class="grid">
+      <div class="tile">
+        <div class="label">status</div>
+        <div class="value" id="statusValue">-</div>
+      </div>
+      <div class="tile">
+        <div class="label">battery</div>
+        <div class="value" id="batteryValue">-</div>
+      </div>
+      <div class="tile">
+        <div class="label">tasks done</div>
+        <div class="value" id="doneValue">0</div>
+      </div>
+      <div class="tile">
+        <div class="label">score</div>
+        <div class="value" id="scoreValue">-</div>
+      </div>
+    </div>
+
+    <div class="row task-row">
+      <div class="label">current task</div>
+      <div class="value mono" id="taskValue">idle</div>
+      <div class="progress"><span id="progressBar"></span></div>
+    </div>
+
+    <div class="row python-row">
+      <div class="label">python</div>
+      <div class="value" id="pythonValue">off</div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="pauseBtn">Pause</button>
+      <button class="danger" id="leaveBtn">Leave</button>
+    </div>
+
+    <div class="services" id="servicesBox">
+      <div class="row name-row">
+        <div class="label">services on the cluster</div>
+        <button class="ghost" id="svcRefreshBtn">Refresh</button>
+      </div>
+      <p class="muted small" id="svcEmpty">No service is running right now.</p>
+      <div id="svcPanel" hidden>
+        <label for="svcSelect">service</label>
+        <select id="svcSelect"></select>
+        <label for="svcFile">send a file</label>
+        <input id="svcFile" type="file">
+        <label for="svcText">or text</label>
+        <input id="svcText" type="text" placeholder="text to send instead of a file">
+        <label for="svcParams">params (JSON, optional)</label>
+        <input id="svcParams" type="text" placeholder='{"lang": "en"}'>
+        <div class="actions">
+          <button class="primary" id="svcCallBtn">Call</button>
+          <button class="ghost" id="svcCancelBtn" disabled>Cancel</button>
+        </div>
+        <div class="progress"><span id="svcProgress"></span></div>
+        <div class="muted small" id="svcStatus"></div>
+        <pre id="svcPartials" class="log small-log" hidden></pre>
+        <pre id="svcResult" class="log small-log" hidden></pre>
+        <div id="svcOutputs"></div>
+      </div>
+    </div>
+
+    <div class="label logs-label">log</div>
+    <pre id="logView" class="log"></pre>
+    <p class="muted tip" id="tip">Keep this tab open and the screen on. The page holds a
+      wake lock while it is visible.</p>
+  </section>
+
+  <section class="card" id="goneCard" hidden>
+    <h2 id="goneTitle">Stopped</h2>
+    <p class="muted" id="goneText">This device is no longer part of the cluster.</p>
+    <button class="primary" id="againBtn">Join again</button>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+  <video id="wakeVideo" muted loop playsinline webkit-playsinline
+         width="1" height="1" aria-hidden="true"></video>
+</div>
+<script src="/w/worker.js"></script>
+</body>
+</html>

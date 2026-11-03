@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d1117">
+<title>PhoneCluster</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2358a6ff'/><rect x='9' y='6' width='14' height='20' rx='3' fill='%230d1117'/><circle cx='16' cy='22' r='1.6' fill='%2358a6ff'/></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ---------------- login ---------------- -->
+<div id="login-screen" class="login-screen" hidden>
+  <form id="login-form" class="login-box" autocomplete="off">
+    <div class="login-logo" aria-hidden="true">
+      <svg viewBox="0 0 48 48" width="46" height="46">
+        <rect x="4" y="10" width="12" height="20" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <rect x="19" y="6" width="12" height="28" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <rect x="34" y="14" width="11" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M10 34v6h28v-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <h1 class="login-title">PhoneCluster</h1>
+    <p class="login-sub">Enter the 6-digit PIN from the coordinator console <span id="version" class="muted"></span></p>
+    <label class="sr-only" for="pin-input">PIN</label>
+    <input id="pin-input" class="input pin-input" type="password" inputmode="numeric" pattern="[0-9]*"
+           maxlength="6" placeholder="······" autocomplete="one-time-code" autofocus>
+    <button id="login-btn" class="btn btn-primary btn-wide" type="submit">Unlock</button>
+    <p id="login-msg" class="login-msg" role="status"></p>
+  </form>
+</div>
+
+<!-- ---------------- app ---------------- -->
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <button id="nav-toggle" class="icon-btn nav-toggle" aria-label="Toggle navigation">☰</button>
+    <span class="brand">Phone<span class="brand-accent">Cluster</span></span>
+    <span class="spacer"></span>
+    <span id="conn" class="conn conn-idle" role="status" aria-live="polite">
+      <span class="conn-dot" aria-hidden="true"></span><span id="conn-text">offline</span>
+    </span>
+    <button id="lock-btn" class="btn btn-sm">Lock</button>
+  </header>
+  <div class="shell">
+    <nav id="nav" class="nav" aria-label="Main"></nav>
+    <main id="view" class="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal-root"></div>
+
+<script src="/static/util.js"></script>
+<script src="/static/api.js"></script>
+<script src="/static/ws.js"></script>
+<script src="/static/jobform.js"></script>
+<script src="/static/views.js"></script>
+<script src="/static/views2.js"></script>
+<script src="/static/services.js"></script>
+<script src="/static/models.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Text-to-speech shaped service that needs no model: turns text into a WAV of
+# beeps (one tone per character) so you can see binary outputs flow back to
+# the caller and play in the dashboard / browser worker.
+#
+#   scripts\pc.ps1 run examples\packages\services\tts-beep
+#   scripts\pc.ps1 call tts-beep --text "hello cluster" -o out\
+#
+# Swap service.py for a real engine (e.g. piper, espeak-ng via subprocess,
+# or a Coqui/ONNX model) keeping the same load()/serve() shape.
+name: "service: tts-beep"
+type: service
+params:
+  name: tts-beep
+  description: text -> WAV (beeps), a stand-in for a real TTS engine
+  code: "@service.py"
+  accepts: text
+  produces: audio/wav
+  request_timeout: 60
+  params:
+    sample_rate: 16000
+    tone_ms: 90

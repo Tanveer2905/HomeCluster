@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phonecluster"
+version = "0.1.0"
+description = "Python SDK and CLI for PhoneCluster, a LAN compute cluster of old Android phones"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Tanveer Ahmad" }]
+keywords = ["cluster", "distributed", "android", "termux", "lan"]
+dependencies = []
+
+[project.scripts]
+pc = "phonecluster.cli:main"
+
+[tool.setuptools]
+packages = ["phonecluster"]
