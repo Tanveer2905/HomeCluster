@@ -1,15 +1,26 @@
 # PhoneCluster
 
-Turn old Android phones and a Windows PC into a free LAN compute and storage cluster.
+Turn the old phones, laptops and PCs in your home into one free compute and storage cluster.
 No root, no cloud, no accounts. Everything lives inside this folder, wherever you put it (the examples
 below use `D:\cluster`; any folder works).
 
 ```
- phones (Termux or Chrome)  ──Wi-Fi──▶  coordinator on the PC (port 8765)  ◀──  dashboard / CLI / Python SDK
-                                          scheduler · SQLite · file store · ffmpeg
+ phones, laptops, other PCs  ──Wi-Fi──▶  coordinator on the main PC (port 8765)  ◀──  dashboard / CLI / Python SDK
+ (Termux, Chrome or worker.py)           scheduler · SQLite · file store · ffmpeg
 ```
 
-## Quick start (PC)
+## Requirements
+
+- **Main PC**: Windows 10 or 11 (the coordinator's scripts are PowerShell). No admin rights, except for the
+  optional firewall rule below. Internet is needed only to download things once (setup, the optional tools,
+  Python on a phone); the cluster itself runs on your own network.
+- **Devices that join**, all on the same Wi-Fi or local network:
+  - Android 7+ with Termux (no root)
+  - Android 5+, iPhone or anything else with a modern browser
+  - Windows 10 or 11 laptops and PCs
+  - Linux with Python 3.8+ (Mac should work the same way but is untested)
+
+## Quick start (main PC)
 
 Double-click **`start.bat`**: it runs setup on the first use, starts the coordinator and the PC worker
 in their own window, and opens the dashboard. **`stop.bat`** stops everything. The same steps by hand:
@@ -27,7 +38,7 @@ scripts\start.ps1        # starts the coordinator + the PC worker; prints the da
 
 The dashboard opens at **http://127.0.0.1:8764**, and only on this PC: other devices on the Wi-Fi cannot
 open it, even with the PIN. Enter the PIN (it is in `data\config.yaml` and the coordinator window), then go
-to **Join** to add phones.
+to **Join** to add devices.
 
 Phones reach the PC on port 8765 (HTTPS). If Windows blocks them, allow it once (admin PowerShell; this is
 the one Windows setting the cluster needs, and you decide whether to make it). Add it **before the first
@@ -56,112 +67,50 @@ minutes); the PIN never leaves the PC. All traffic to phones is encrypted (HTTPS
 cluster makes for itself in `data\tls` (nothing is installed in Windows). Wrong codes, PINs or device keys
 lock the guesser out for a while. Requests that name the PC by a strange host name are refused.
 
-## Adding a phone
+## Adding a device
 
-| phone | how |
+| device | how |
 |---|---|
 | Android 7+ (Redmi 5A, Redmi Note 10) | Install Termux from F-Droid. On the PC's Join page scan the *Termux phone* QR, tap Copy, paste into Termux (a one-time code is inside). Optional `pkg install termux-api ffmpeg`. |
 | Android 5/6 (Samsung J2), iPhone, anything with Chrome | Scan the QR on the PC's Join page. The browser warns once that the connection is "not private" (the cluster's own certificate): continue. The tab is the worker. |
 | Windows laptop or PC | Paste the Join page's *Windows PC or laptop* command into PowerShell or Command Prompt on it. Everything goes into `phonecluster` in the user's folder, Python included (copied from this PC); no admin rights. `start-worker.cmd` there starts it again later. |
-| Linux or Mac computer | Paste the *Termux / Linux / Mac* one-liner into a terminal (needs `python3` 3.8+). |
+| Linux or Mac computer (Mac untested) | Paste the *Termux / Linux / Mac* one-liner into a terminal (needs `python3` 3.8+). |
 
-Details, battery-optimization settings and per-phone notes: [docs/PHONE-SETUP.md](docs/PHONE-SETUP.md).
+Details, battery-optimization settings, per-phone notes and laptops: [docs/PHONE-SETUP.md](docs/PHONE-SETUP.md).
 
-**Removing a phone:** close Termux or the browser tab. It shows offline within 30 s and its tasks are reassigned.
-Click **Remove** on the Devices page to forget it.
+**Removing a device:** close Termux, the browser tab or the worker's window. It shows offline within 30 s and
+its tasks are reassigned. Click **Remove** on the Devices page to forget it.
 
 ## What it can run
 
 | job type | what | runs on |
 |---|---|---|
-| `python_map` | your Python function over a list of items, or over every line of a big file, chunked across devices | Termux + PC, and browsers once `get-pyodide.ps1` has run |
-| `shell` | a shell command on one device or every device | Termux + PC |
+| `python_map` | your Python function over a list of items, or over every line of a big file, chunked across devices | Termux phones, PCs and laptops, and browsers once `get-pyodide.ps1` has run |
+| `shell` | a shell command on one device or every device | Termux phones, PCs and laptops |
 | `media` | ffmpeg resize / thumbnail / transcode / extract audio, videos split into segments and joined back | devices with ffmpeg |
 | `hash_search`, `prime_range`, `monte_carlo_pi` | number crunching demos | everything, including browsers |
 | `sensor` | camera photo, mic recording, GPS, battery, sensors via Termux:API | phones with Termux:API |
 | `benchmark` | scores a device; faster devices get tasks first | everything |
 | `custom` | raw task payloads for your own plugins | whatever the payload asks for |
-| `service` | a model that stays loaded and answers requests from other devices | Termux + PC |
+| `service` | a model that stays loaded and answers requests from other devices | Termux phones, PCs and laptops |
 | `wasm` | one compiled WebAssembly program, run as a function over a range or as a program per input file | PC, Termux phones and browsers, the same `.wasm` file |
 
 Add your own type by dropping a module into `data/plugins/` (see [docs/SPEC.md](docs/SPEC.md) section 7).
 
-**Job packages:** put a `job.yaml` next to your code and data files and submit the folder in one go
-with `scripts\pc.ps1 run <folder>`; file references like `code: "@main.py"` or `inputs: "@photos/*.jpg"`
-are inlined or uploaded for you. See [docs/PACKAGES.md](docs/PACKAGES.md) and `examples/packages/`.
+## Features
 
-Also: pipelines (job B waits for job A and can read its result), cron schedules, job templates,
-result export as JSON / CSV / zip, live task logs, a line-mode remote shell into any Termux or PC worker,
-pooled storage that spreads files across phones, and notifications (Windows toast, phone notification,
-webhook).
+- **One program everywhere**: compile to WebAssembly once and the same `.wasm` runs on the PC, phones and browser tabs.
+- **AI models, even too big for one device**: llama.cpp models run on the best device, or split across several.
+- **Model services**: keep a model loaded on one device and call it from all the others.
+- **As fast as the fastest device, or faster**: work is sized to each device's measured speed, and slow devices are skipped.
+- **Never computes the same thing twice**: earlier results are reused, and only changed inputs run again.
+- **Catches wrong answers**: about 5 % of tasks are re-checked on another device, and wrong devices lose trust.
+- **Safe for old phones**: per-device switches and limits; phones rest when hot, and models start only with enough battery.
+- **Storage across phones** that survives losing one, at 1.3x the space (erasure coding, checked daily).
+- **Nothing lost**: results wait in an outbox if the PC is away, and long tasks resume on another device.
+- **Everyday tools**: job packages, pipelines, cron schedules, exports, live logs, remote shell, a phone's screen on the PC, notifications.
 
-**One program runs everywhere.** Compile once to WebAssembly (Rust, C, Zig, Go, ...) and the same `.wasm`
-file runs on the PC (wasmtime), on Termux phones (wasmtime, installed by the worker the first time) and in a
-browser tab like the Samsung J2's, sandboxed: no network, only its own `/in` and `/out` folders.
-`scripts\pc.ps1 wasm examples\wasm\primes.wasm --call count_primes --range 2 100000000 --wait`.
-See [docs/WASM.md](docs/WASM.md).
-
-**Never compute the same thing twice.** A job whose code and inputs match an earlier one (maps, number
-crunching, media, WebAssembly) is answered from the stored result at once, and a job where only some inputs
-changed re-runs only those tasks, so a pipeline run again recomputes only what changed. Shell commands,
-sensors and services are never reused; a job can say `cache: false`, and the job page has **Run again fresh**.
-`scripts\pc.ps1 cache` shows what is stored.
-
-**Wrong answers from old hardware get caught.** About 5 % of the tasks of exact job types run a second time
-on another device. If the answers differ, a third device decides; the device that was wrong loses trust, its
-recent work is computed again (finished jobs included) and you get a notification. A device that is wrong
-three times in a day gets no more jobs until you press **Trust again**. `scripts\pc.ps1 trust`.
-
-**Phones pass big inputs to each other.** When several phones need the same big file, a phone that already
-has it sends it to the next one while the PC sends other pieces, instead of the PC's Wi-Fi carrying every
-copy. A phone opens a port only while sending, only for a one-time token, and every piece is checked against
-the PC's own copy.
-
-**Storage that survives a lost phone at 1.3x the space.** With three or more storage phones, files are
-stored as data pieces plus a parity piece on different phones (erasure coding) instead of two full copies:
-losing any one phone loses nothing. Every stored piece is re-checked on its phone once a day; a damaged one
-is rebuilt from the others.
-
-**You decide what each device does, and the cluster keeps it safe.** Every connected device has a
-master switch, role switches (jobs / AI models / storage) and limits for its CPU, memory and, on the PC,
-graphics card. The *Balanced* safety profile rests a phone at 40 °C, moves its work off at 43 °C, starts
-models only on a charging phone or one above 50 % battery, leaves one core idle and never gives a model
-more than 70 % of the free memory. `scripts\pc.ps1 device-set redmi5a --ai off --cpu 50`.
-
-**Jobs finish at least as fast as on the fastest device alone.** You don't pick chunk sizes: the
-cluster cuts the work into pieces as it goes, sized to each device's measured speed so they all finish
-together, and remembers every device's speed per kind of work for next time (`scripts\pc.ps1 speeds`).
-A slow phone is skipped when the faster devices would finish before it; a device that runs out of work
-runs a backup copy of a slower device's task and the first result wins. Chats and other service
-requests come first: a device's background tasks pause while it answers. Each job reports how it did
-against its fastest device alone (`scripts\pc.ps1 job <id>`, the job page).
-
-**Host a model on one phone, use it from all of them.** A `service` job keeps a model loaded on a
-capable device (Vosk speech-to-text, image classification, translation, TTS, ...) and any other device
-calls it: the input streams through the coordinator to the model, partial results come back live, and the
-weakest phone gets the answer without doing the work. Start one with `scripts\pc.ps1 run
-examples\packages\services\echo-demo`, call it with `scripts\pc.ps1 call echo-demo file.bin --follow`, or
-use the Services page. See [docs/SERVICES.md](docs/SERVICES.md).
-
-**Run AI models, even ones too big for any single device.** Pick a GGUF model: if it fits on one
-device it runs there alone on the fastest one (the PC's graphics card first); if it is too big it is
-split over the fewest fast devices, each holding part of the layers. Or choose the devices yourself.
-Every device can use the result, and a model moves to other devices when one gets too hot or is switched
-off. `scripts\get-llama.ps1 -Vulkan` and `scripts\get-model.ps1` fetch llama.cpp and a small test model;
-then just call it: `scripts\pc.ps1 llm ask chat "Hello"` loads the model on the best device the first
-time, it unloads after 10 unused minutes, and a busy model gets a second copy. See [docs/LLM.md](docs/LLM.md).
-
-**Nothing is lost when the PC goes away.** A phone that finishes a task while the coordinator is
-unreachable keeps the result and its output files in an outbox and delivers them on reconnect; the
-coordinator accepts the late result even if it had already handed the task to someone else.
-
-**Long tasks resume instead of restarting.** `ctx.checkpoint(state)` saves progress; if the device
-dies the next attempt, on any device, gets it back through `ctx.resume()`. Map jobs checkpoint after
-every item automatically, so a chunk half done on one phone finishes on another.
-
-**Big files stream.** `c.map_lines(fn, "huge.txt")` or `pc map fn.py:fn huge.txt --lines` gives each
-task its own byte range of the file, and `stream_results` writes items to a JSONL file as tasks finish.
-Read them with `job.iter_results()` or `pc results <job>` without loading everything into memory.
+Each one in detail, with the commands: [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Python SDK and CLI
 

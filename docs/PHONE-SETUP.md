@@ -142,8 +142,8 @@ your PC, and the code works once, for 10 minutes.
   the worker, its state, and a copy of the PC's own portable Python (from the PC, not the internet). Nothing is
   installed, no admin rights are needed and no setting changes. Later, double-click `start-worker.cmd` in that folder
   to start the worker again.
-- **Linux or Mac**: copy **Termux / Linux / Mac one-liner** and paste it into a terminal. It needs Python 3.8 or newer
-  (`python3`). Next time: `cd ~/phonecluster && python3 worker.py`.
+- **Linux or Mac** (Mac untested): copy **Termux / Linux / Mac one-liner** and paste it into a terminal. It needs
+  Python 3.8 or newer (`python3`). Next time: `cd ~/phonecluster && python3 worker.py`.
 
 The laptop connects out to the PC; it needs no firewall change. When it first passes a file to another device,
 Windows may ask whether `python.exe` may accept connections: **Allow** (Private networks) lets the other devices fetch
