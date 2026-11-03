@@ -4,6 +4,8 @@ Turn the old phones, laptops and PCs in your home into one free compute and stor
 No root, no cloud, no accounts. Everything lives inside this folder, wherever you put it (the examples
 below use `D:\cluster`; any folder works).
 
+![Dashboard](docs/Screenshot.png)
+
 ```
  phones, laptops, other PCs  ──Wi-Fi──▶  coordinator on the main PC (port 8765)  ◀──  dashboard / CLI / Python SDK
  (Termux, Chrome or worker.py)           scheduler · SQLite · file store · ffmpeg
