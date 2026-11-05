@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from ._wasm_kernels import kernel, wasm_impl
 
 TYPE = "monte_carlo_pi"
 DESCRIPTION = "Estimate pi by throwing random darts at a quarter circle"
@@ -15,7 +17,7 @@ PARAMS = [
 
 DEFAULT_OPTIONS: Dict[str, Any] = {"requires": []}
 #: seeded per piece, so a repeat gives the same numbers (on the same runtime:
-#: Python and JS use different generators, checks compare like with like)
+#: Python, JS and WebAssembly use different generators, checks compare like with like)
 CACHE = True
 VERIFY = True
 
@@ -70,14 +72,21 @@ def _samples(params: Dict[str, Any]) -> int:
     return samples
 
 
-def _payload(options: Dict[str, Any], count: int, seed: int) -> Dict[str, Any]:
+def _payload(options: Dict[str, Any], count: int, seed: int,
+             module: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     args = {"samples": count, "seed": seed}
+    impls: Dict[str, Any] = {
+        "python": {"code": WORKER_PY, "entry": "run", "args": args},
+        "js": {"code": WORKER_JS, "entry": "run", "args": args},
+    }
+    inputs: List[str] = []
+    if module is not None:
+        # where wasmtime is ready the darts are thrown by WebAssembly, many times faster
+        impls["wasm"] = wasm_impl(module, [count, seed])
+        inputs = [module["id"]]
     return {
-        "impls": {
-            "python": {"code": WORKER_PY, "entry": "run", "args": args},
-            "js": {"code": WORKER_JS, "entry": "run", "args": args},
-        },
-        "inputs": [],
+        "impls": impls,
+        "inputs": inputs,
         "timeout": options.get("timeout"),
         "requires": list(options.get("requires") or []),
         "meta": {"samples": count, "units": count},
@@ -92,25 +101,26 @@ def work(params: Dict[str, Any], options: Dict[str, Any], ctx: Any) -> Any:
     """Automatic sizing unless a number of chunks was given (SPEC §9.6)."""
     if _fixed_chunks(params, options) > 0:
         return None
-    return {"units": _samples(params), "grain": 1000}
+    return {"units": _samples(params), "grain": 1000, "state": {"module": kernel("count_inside", ctx)}}
 
 
 def piece(params: Dict[str, Any], options: Dict[str, Any], ctx: Any, state: Any,
           lo: int, hi: int) -> Dict[str, Any]:
     # a seed per position keeps pieces independent and the run reproducible
-    return _payload(options, hi - lo, 1000003 + lo)
+    return _payload(options, hi - lo, 1000003 + lo, (state or {}).get("module"))
 
 
 def split(params: Dict[str, Any], options: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
     samples = _samples(params)
     chunks = max(1, min(_fixed_chunks(params, options) or 4, samples))
     base, extra = divmod(samples, chunks)
+    module = kernel("count_inside", ctx)
     payloads: List[Dict[str, Any]] = []
     for i in range(chunks):
         count = base + (1 if i < extra else 0)
         if count <= 0:
             continue
-        payloads.append(_payload(options, count, 1000003 + i * 7919))
+        payloads.append(_payload(options, count, 1000003 + i * 7919, module))
     return payloads
 
 
@@ -118,7 +128,13 @@ def reduce(params: Dict[str, Any], results: List[Dict[str, Any]], ctx: Any) -> A
     inside = 0
     samples = 0
     for item in results:
-        value = item.get("result") or {}
+        value = item.get("result")
+        if isinstance(value, int) and not isinstance(value, bool):
+            # the WebAssembly version answers with the count inside; the task knows its samples
+            inside += value
+            samples += int((item.get("meta") or {}).get("samples") or 0)
+            continue
+        value = value or {}
         if not isinstance(value, dict):
             continue
         inside += int(value.get("inside") or 0)

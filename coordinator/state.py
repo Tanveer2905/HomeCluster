@@ -31,13 +31,16 @@ from .verify import Verifier
 from .speeds import SpeedMemory
 from .scheduler import Scheduler
 from .schedules import CronError, ScheduleRunner, next_run
+from .cleanup import Cleanup
 from .discovery import DiscoveryService
+from .downloads import Downloads
 from .llm import LLMManager
 from .results import ResultStream
 from .services import ServiceRegistry
 from .storage import StorageManager
 from .screen import ScreenManager
 from .terminal import TerminalManager
+from .updates import WorkerUpdates
 
 log = logging.getLogger("coordinator.state")
 
@@ -57,10 +60,12 @@ class ClusterState:
         self.db = Database(self.data / "cluster.db")
         self._apply_saved_settings()
         self.files = FileStore(self.db, self.data / "files")
+        self.downloads = Downloads(self.data)   # the dashboard's Save buttons write here
         self.plugins: Registry = build_registry(self.data / "plugins")
         self.hub = Hub(self)
         self.terminals = TerminalManager(self)
         self.screens = ScreenManager(self)
+        self.updates = WorkerUpdates(self)   # workers that update themselves (SPEC 8.4)
         self.notifier = Notifier(self)
         self.storage = StorageManager(self)
         self.results = ResultStream(self)
@@ -76,6 +81,7 @@ class ClusterState:
         self.autoscaler = Autoscaler(self)
         self.scheduler = Scheduler(self)
         self.schedules = ScheduleRunner(self)
+        self.cleanup = Cleanup(self)   # only final results stay (SPEC 9.10)
         self.queues: Dict[str, asyncio.Queue] = {}
         self.started_at = time.time()
         self.port: int = self.config.port
@@ -91,11 +97,13 @@ class ClusterState:
         await self.schedules.start()
         await self.discovery.start()
         await self.llm.start()
+        await self.cleanup.start()
         self.log.info(
             "coordinator ready: %d plugin(s), data dir %s", len(self.plugins), self.data
         )
 
     async def shutdown(self) -> None:
+        await self.cleanup.stop()
         await self.llm.close()
         await self.discovery.stop()
         await self.schedules.stop()
@@ -150,6 +158,7 @@ class ClusterState:
             "verify": dict(self.config.get("verify") or {}),
             "transfers": dict(self.config.get("transfers") or {}),
             "security": dict(self.config.get("security") or {}),
+            "cleanup": dict(self.config.get("cleanup") or {}),
             "pin": self.config.pin,
             "port": self.config.port,
             "local_port": self.config.local_port,
@@ -212,6 +221,7 @@ class ClusterState:
         device.pop("token_hash", None)
         device["control"] = self.safety.view(device)
         device["trust"] = self.verifier.view(device)
+        device["update"] = self.updates.view(device)
         self.hub.publish({"ev": "device", "device": device})
 
     def publish_job(self, job_id: str) -> None:

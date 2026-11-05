@@ -218,7 +218,7 @@
         PC.clear(outputsEl);
         (res.outputs || []).forEach(function (o) {
           var row = h('div', { class: 'output-row' },
-            h('button', { class: 'btn btn-sm', onclick: function () { PC.api.download('/api/files/' + encodeURIComponent(o.file_id) + '/download', o.name); } }, 'Download'),
+            h('button', { class: 'btn btn-sm', title: 'Save into data\\downloads', onclick: function () { PC.api.save('/files/' + encodeURIComponent(o.file_id) + '/save', o.name); } }, 'Save'),
             h('span', {}, o.name + (o.size ? ' (' + PC.fmtBytes(o.size) + ')' : '')));
           var preview = previewFor(o);
           if (preview) row.appendChild(preview);

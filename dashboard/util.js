@@ -149,11 +149,13 @@
   })();
 
   /* ---------- toasts ---------- */
-  PC.toast = function (msg, kind, ms) {
+  /* action: optional {label, onClick}, a button in the toast */
+  PC.toast = function (msg, kind, ms, action) {
     var root = document.getElementById('toasts');
     if (!root) return;
     var t = PC.h('div', { class: 'toast toast-' + (kind || 'info'), role: 'status' },
       PC.h('span', { class: 'toast-msg' }, String(msg)),
+      action ? PC.h('button', { class: 'btn btn-sm toast-action', onclick: function () { close(); action.onClick(); } }, action.label) : null,
       PC.h('button', { class: 'toast-x', 'aria-label': 'Dismiss', onclick: function () { close(); } }, '×')
     );
     function close() { if (t.parentNode) { t.classList.add('out'); setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 200); } }

@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse
 from . import policy
 from .auth import SESSION_COOKIE, client_host, locked, pin_matches, require_pin
 from .db import now
-from .models import DevicePatch, LoginRequest, NotifyRequest, SettingsPatch, TerminalOpen, TrustPatch
+from .models import (DevicePatch, LoginRequest, NotifyRequest, SettingsPatch, TerminalOpen,
+                     TerminalResize, TrustPatch)
 from .screen import ScreenError
 
 log = logging.getLogger("coordinator.api.devices")
@@ -181,6 +182,7 @@ async def list_devices(request: Request, limit: int = 200, offset: int = 0) -> L
         device["healthy"] = state.scheduler.healthy(device)
         device["control"] = state.safety.view(device)
         device["trust"] = state.verifier.view(device)
+        device["update"] = state.updates.view(device)
     return rows
 
 
@@ -208,6 +210,7 @@ async def get_device(request: Request, device_id: str) -> Dict[str, Any]:
     device["healthy"] = state.scheduler.healthy(device)
     device["control"] = state.safety.view(device)
     device["trust"] = state.verifier.view(device)
+    device["update"] = state.updates.view(device)
     return device
 
 
@@ -221,6 +224,9 @@ async def patch_device(request: Request, device_id: str, body: DevicePatch) -> D
     command: Dict[str, Any] = {"cmd": "config"}
     if body.name is not None:
         fields["name"] = str(body.name)
+        # a name given here survives the worker joining again (restarts, updates)
+        fields["settings"] = dict(device.get("settings") or {}, name_set=True)
+        device["settings"] = fields["settings"]
     if body.slots is not None:
         fields["slots"] = max(1, int(body.slots))
         command["slots"] = fields["slots"]
@@ -333,7 +339,7 @@ async def show_screen(request: Request, device_id: str) -> Dict[str, Any]:
 async def open_terminal(request: Request, body: TerminalOpen) -> Dict[str, Any]:
     state = _state(request)
     try:
-        session = state.terminals.open(body.device_id)
+        session = state.terminals.open(body.device_id, body.pty, body.cols, body.rows)
     except KeyError:
         raise HTTPException(status_code=404, detail="no such device")
     except ValueError as exc:
@@ -353,6 +359,18 @@ async def terminal_scrollback(request: Request, session_id: str) -> Dict[str, An
     if session is None:
         raise HTTPException(status_code=404, detail="no such session")
     return session.scrollback()
+
+
+@router.post("/terminal/{session_id}/resize")
+async def resize_terminal(request: Request, session_id: str, body: TerminalResize) -> Dict[str, Any]:
+    """A full terminal's new size (line sessions have none)."""
+    terminals = _state(request).terminals
+    session = terminals.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="no such session")
+    if not terminals.resize(session_id, body.cols, body.rows, body.redraw):
+        raise HTTPException(status_code=400, detail="not a full terminal")
+    return session.to_dict()
 
 
 @router.delete("/terminal/{session_id}")

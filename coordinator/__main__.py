@@ -24,6 +24,8 @@ from .config import data_dir as resolve_data_dir, ensure_dirs, load_config, root
 log = logging.getLogger("coordinator.main")
 
 WORKER_STOP_GRACE = 10.0
+#: worker.py's RESTART_CODE: it updated itself and wants to be started again (SPEC 8.4)
+WORKER_RESTART = 75
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,6 +95,7 @@ def spawn_local_worker(root: Path, data: Path, port: int, code: str, slots: int)
     env = dict(os.environ)
     env["PC_ROOT"] = str(root)
     env["PC_JOIN_CODE"] = code
+    env["PC_SUPERVISED"] = "1"   # after updating itself it exits and is started again here
     env.pop("PC_PIN", None)
     env.setdefault("PYTHONUNBUFFERED", "1")
     try:
@@ -153,11 +156,19 @@ async def _serve(server: uvicorn.Server, local: uvicorn.Server, state: Any, spaw
         while not local.started and not local_serving.done():
             await asyncio.sleep(0.05)
         banner(state, port, pin)
-        if spawn:
+
+        async def start_worker() -> Optional[subprocess.Popen]:
             code = state.security.codes.create("PC worker")["code"]
-            worker = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 spawn_local_worker, state.root, state.data, state.config.local_port, code, slots
             )
+
+        if spawn:
+            worker = await start_worker()
+        while not (await asyncio.wait({serving}, timeout=1.0))[0]:
+            if worker is not None and worker.poll() == WORKER_RESTART:
+                log.info("the local worker updated itself: starting it again")
+                worker = await start_worker()
         await serving
     finally:
         server.should_exit = True

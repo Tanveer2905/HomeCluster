@@ -101,7 +101,9 @@ Add your own type by dropping a module into `data/plugins/` (see [docs/SPEC.md](
 
 ## Features
 
-- **One program everywhere**: compile to WebAssembly once and the same `.wasm` runs on the PC, phones and browser tabs.
+- **Workers update themselves**: change `worker.py` on the PC and every device picks it up when idle, checked first.
+- **One program everywhere**: compile to WebAssembly once and the same `.wasm` runs on the PC, phones and browser tabs;
+  the built-in prime and pi jobs use it too (about 60x faster than Python on the PC).
 - **AI models, even too big for one device**: llama.cpp models run on the best device, or split across several.
 - **Model services**: keep a model loaded on one device and call it from all the others.
 - **As fast as the fastest device, or faster**: work is sized to each device's measured speed, and slow devices are skipped.
@@ -110,7 +112,13 @@ Add your own type by dropping a module into `data/plugins/` (see [docs/SPEC.md](
 - **Safe for old phones**: per-device switches and limits; phones rest when hot, and models start only with enough battery.
 - **Storage across phones** that survives losing one, at 1.3x the space (erasure coding, checked daily).
 - **Nothing lost**: results wait in an outbox if the PC is away, and long tasks resume on another device.
-- **Everyday tools**: job packages, pipelines, cron schedules, exports, live logs, remote shell, a phone's screen on the PC, notifications.
+- **Only the final result stays**: in-between data goes an hour after a job succeeds; after 30 days (a setting) only the
+  job and its final result are kept, and its output files go too, so save the ones you want.
+- **A real terminal in the dashboard**: htop, vim and Ctrl+C work on Termux phones, Linux, laptops and PCs (browser tabs
+  have no shell). Open several at once, switch between them with tabs, or see 2, 3 or all of them in split view.
+- **Everyday tools**: job packages, pipelines, cron schedules, exports, live logs, a phone's screen on the PC, notifications,
+  and Save buttons that put files straight into `data\downloads`.
+- **Light and dark dashboard**: follows Windows, or pin one with the top bar's button.
 
 Each one in detail, with the commands: [docs/FEATURES.md](docs/FEATURES.md).
 
@@ -139,7 +147,7 @@ scripts\pc.ps1 shell "df -h" --all --wait
 scripts\pc.ps1 submit media --param op=thumbnail --file inputs=C:\clip.mp4 --wait
 scripts\pc.ps1 run examples\packages\wordcount --wait
 scripts\pc.ps1 export <job-id> --format zip -o results.zip
-scripts\pc.ps1 terminal <device-id>
+scripts\pc.ps1 terminal <device-id>       # line mode; the dashboard's Terminal page has the full terminal
 ```
 
 More examples in `examples/`, full reference in [docs/SDK.md](docs/SDK.md).
@@ -149,10 +157,11 @@ More examples in `examples/`, full reference in [docs/SDK.md](docs/SDK.md).
 ```
 coordinator/   FastAPI app: API, scheduler, storage, plugins, dashboard hosting
 worker/        worker.py (Termux/PC, single file, stdlib only) and browser/ (Chrome worker page)
-dashboard/     vanilla-JS dashboard, served at /
+dashboard/     vanilla-JS dashboard, served at / (fonts, logo and xterm.js bundled; nothing loads from the internet)
 sdk/           phonecluster Python package (SDK + CLI), stdlib only
-tests/         625 tests incl. end-to-end runs with real worker processes, wasmtime and real llama.cpp
+tests/         672 tests incl. end-to-end runs with real worker processes, wasmtime and real llama.cpp
 data/          runtime state: config.yaml (PIN), cluster.db, files/, logs/  (created on first start)
+data/downloads/ where the dashboard's Save buttons put files (Files page → Open downloads folder)
 tools/ffmpeg/  ffmpeg.exe + ffprobe.exe (downloaded by scripts\get-ffmpeg.ps1)
 tools/pyodide/ CPython for browsers (downloaded by scripts\get-pyodide.ps1)
 tools/llama.cpp/ pinned llama.cpp builds for distributed models (scripts\get-llama.ps1)

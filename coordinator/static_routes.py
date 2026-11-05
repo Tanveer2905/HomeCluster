@@ -134,17 +134,23 @@ Write-Host 'downloading worker.py ...'
 Get-FromPC '/worker.py' (Join-Path $dir 'worker.py')
 
 # start-worker.cmd starts the worker again later: it remembers the cluster in state\
+# (exit code 75: the worker updated itself and starts again)
 $run = if ($python -eq $own) { 'python\python.exe' } else { $python }
 $launcher = @('@echo off',
     'rem PhoneCluster worker: keep this window open; Ctrl+C or closing it stops the worker.',
     'cd /d "%~dp0"',
-    ('"{0}" -u -X utf8 worker.py --state-dir state %*' -f $run)) -join "`r`n"
+    'set PC_SUPERVISED=1',
+    ':run',
+    ('"{0}" -u -X utf8 worker.py --state-dir state %*' -f $run),
+    'if %errorlevel%==75 goto run') -join "`r`n"
 [IO.File]::WriteAllText((Join-Path $dir 'start-worker.cmd'), $launcher + "`r`n")
 
 Write-Host ''
 Write-Host "joining the cluster at $url (keep this window open) ..."
 Write-Host "Later: $dir\start-worker.cmd starts the worker again. To remove it, delete $dir."
+$env:PC_SUPERVISED = '1'
 & $python -u -X utf8 worker.py --url $url --ca cluster-ca.pem --join $code --state-dir state
+while ($LASTEXITCODE -eq 75) { & $python -u -X utf8 worker.py --state-dir state }
 """
 
 BROWSER_PLACEHOLDER = """<!doctype html><meta charset="utf-8">

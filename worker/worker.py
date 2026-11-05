@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import binascii
+import codecs
 import errno
 import hashlib
 import json
@@ -34,9 +35,24 @@ try:
 except ImportError:  # pragma: no cover - python 2 never supported, kept explicit
     raise SystemExit("PhoneCluster worker requires Python 3.8+")
 
-VERSION = "1.0"
+VERSION = "1.1"
 IS_WINDOWS = os.name == "nt"
 DEFAULT_STATE_DIR = os.path.join(os.path.expanduser("~"), ".phonecluster")
+WORKER_FILE = os.path.abspath(__file__)
+#: exit code that asks a launcher which set PC_SUPERVISED to start the worker again
+RESTART_CODE = 75
+
+
+def file_sha256(path):
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except (IOError, OSError):
+        return None
+
+
+#: what this process runs: read once at start, so a newer file on disk shows up as different
+SELF_SHA256 = file_sha256(WORKER_FILE)
 SENT_RESULT = "__PC_RESULT__"
 SENT_WORK = "__PC_WORK__"
 SENT_ERROR = "__PC_ERROR__"
@@ -962,6 +978,8 @@ def detect_caps(state_dir):
         caps.append("termux_api")
     if find_wasmtime() or can_install_wasmtime():
         caps.append("wasm")
+    if pty_supported():
+        caps.append("pty")  # full terminal: htop, vim, top (SPEC 10)
     free = free_mb(state_dir)
     if free is not None and free >= STORAGE_CAP_MB:
         caps.append("storage")
@@ -1089,6 +1107,9 @@ def collect_info():
         "android_api": android_api(),
         # the PC worker started by the coordinator reads models from the project folder
         "coordinator_local": bool(os.environ.get("PC_ROOT")),
+        # which worker.py this is: the coordinator offers a newer one (SPEC 8.4)
+        "worker_sha256": SELF_SHA256,
+        "worker_version": VERSION,
     }
 
 
@@ -2414,6 +2435,14 @@ class TaskRun(object):
                 return {"ok": False,
                         "error": "no supported impl (have %s, offered %s)"
                                  % (",".join(self.worker.caps), ",".join(sorted(impls)))}
+            # a job that offers WebAssembly too (the built-in number crunching) runs it
+            # wherever wasmtime is ready or can be installed: the same answer, much faster
+            if kind == "python" and "wasm" in impls and "wasm" in self.worker.caps:
+                try:
+                    self.worker.wasm_runtime(self.log_line)
+                    kind = "wasm"
+                except Exception as exc:
+                    self.log_line("[worker] using Python instead of WebAssembly: %s" % exc)
             self.workdir = mkdirs(os.path.join(self.worker.work_dir, self.id))
             inputs = self.payload.get("inputs") or []
             paths = self.worker.fetch_inputs(inputs, self.log_line, self.task.get("peer_inputs"))
@@ -2853,22 +2882,328 @@ class TaskRun(object):
 # terminal (SPEC 8 / 10)
 # --------------------------------------------------------------------------
 
+TERM_COLS = (10, 500)
+TERM_ROWS = (2, 300)
+
+
+def clamp_size(cols, rows):
+    """A terminal size the pseudo-terminal accepts; 80 x 24 when unknown."""
+    def one(value, limits, default):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(limits[0], min(limits[1], value))
+
+    return one(cols, TERM_COLS, 80), one(rows, TERM_ROWS, 24)
+
+
+def pty_supported():
+    """A full (interactive) terminal is possible here: a pseudo-terminal on
+    Termux / Linux, ConPTY on Windows 10 1809 and later."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+
+            return hasattr(ctypes.WinDLL("kernel32"), "CreatePseudoConsole")
+        except Exception:
+            return False
+    try:
+        import fcntl  # noqa: F401
+        import pty  # noqa: F401
+        import termios  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class PosixPty(object):
+    """A shell on a pseudo-terminal: full-screen programs (htop, vim, top) work."""
+
+    def __init__(self, argv, cols, rows, cwd):
+        import fcntl
+        import pty
+        import termios
+
+        self.fcntl, self.termios = fcntl, termios
+        master, slave = pty.openpty()
+        self.fd = master
+        self.resize(cols, rows)
+        env = dict(os.environ, TERM="xterm-256color")
+        make_tty = getattr(termios, "TIOCSCTTY", 0x540E)
+
+        def take_terminal():
+            # in the shell's process, after setsid: the pseudo-terminal becomes
+            # its controlling terminal (job control, Ctrl+C, window size)
+            try:
+                fcntl.ioctl(0, make_tty, 0)
+            except Exception:
+                pass
+
+        try:
+            self.proc = subprocess.Popen(
+                argv, stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
+                start_new_session=True, preexec_fn=take_terminal, close_fds=True)
+        except Exception:
+            os.close(master)
+            raise
+        finally:
+            os.close(slave)
+
+    def read(self):
+        import select
+
+        while True:
+            try:
+                ready = select.select([self.fd], [], [], 0.5)[0]
+            except (OSError, ValueError):
+                return b""
+            if ready:
+                try:
+                    return os.read(self.fd, 65536)
+                except OSError:
+                    return b""  # EIO: nothing has the terminal open any more
+            # the shell is gone and nothing more came: done, even when a
+            # background job still holds the terminal
+            if self.proc.poll() is not None:
+                return b""
+
+    def write(self, data):
+        while data:
+            written = os.write(self.fd, data)
+            data = data[written:]
+
+    def resize(self, cols, rows):
+        import struct
+
+        self.fcntl.ioctl(self.fd, self.termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+    def kill(self):
+        """Hang up like a closed terminal window: the shell's group and the program in
+        the foreground (htop runs in its own group under bash), then SIGKILL."""
+        groups = set()
+        for find in (lambda: os.getpgid(self.proc.pid), lambda: os.tcgetpgrp(self.fd)):
+            try:
+                groups.add(find())
+            except OSError:
+                pass
+        # never our own group: with no foreground job the terminal answers 0,
+        # and killpg(0) would hit the worker itself
+        groups.discard(0)
+        groups.discard(1)
+        groups.discard(os.getpgrp())
+        for sig, wait in ((signal.SIGHUP, 1), (signal.SIGKILL, 5)):
+            for group in groups:
+                try:
+                    os.killpg(group, sig)
+                except OSError:
+                    pass
+            try:
+                self.proc.wait(timeout=wait)
+            except Exception:
+                pass
+
+    def release(self):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+class WinConPty(object):
+    """A shell on a Windows pseudo console (ConPTY), driven through kernel32 with
+    ctypes: no extra package, so it works with any Windows Python 3.8+."""
+
+    PSEUDOCONSOLE = 0x00020016            # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+    EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+    STARTF_USESTDHANDLES = 0x00000100
+
+    def __init__(self, cmdline, cols, rows, cwd):
+        import ctypes
+        from ctypes import wintypes as w
+
+        self.ct = ctypes
+        k = self.k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle_p = ctypes.POINTER(w.HANDLE)
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", w.SHORT), ("Y", w.SHORT)]
+
+        class STARTUPINFOW(ctypes.Structure):
+            _fields_ = [("cb", w.DWORD), ("lpReserved", w.LPWSTR), ("lpDesktop", w.LPWSTR),
+                        ("lpTitle", w.LPWSTR), ("dwX", w.DWORD), ("dwY", w.DWORD),
+                        ("dwXSize", w.DWORD), ("dwYSize", w.DWORD), ("dwXCountChars", w.DWORD),
+                        ("dwYCountChars", w.DWORD), ("dwFillAttribute", w.DWORD), ("dwFlags", w.DWORD),
+                        ("wShowWindow", w.WORD), ("cbReserved2", w.WORD), ("lpReserved2", ctypes.c_void_p),
+                        ("hStdInput", w.HANDLE), ("hStdOutput", w.HANDLE), ("hStdError", w.HANDLE)]
+
+        class STARTUPINFOEXW(ctypes.Structure):
+            _fields_ = [("StartupInfo", STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [("hProcess", w.HANDLE), ("hThread", w.HANDLE),
+                        ("dwProcessId", w.DWORD), ("dwThreadId", w.DWORD)]
+
+        self.COORD = COORD
+        k.CreatePseudoConsole.argtypes = [COORD, w.HANDLE, w.HANDLE, w.DWORD, handle_p]
+        k.CreatePseudoConsole.restype = ctypes.c_long
+        k.ResizePseudoConsole.argtypes = [w.HANDLE, COORD]
+        k.ResizePseudoConsole.restype = ctypes.c_long
+        k.ClosePseudoConsole.argtypes = [w.HANDLE]
+        k.ClosePseudoConsole.restype = None
+        k.CreatePipe.argtypes = [handle_p, handle_p, ctypes.c_void_p, w.DWORD]
+        k.InitializeProcThreadAttributeList.argtypes = [ctypes.c_void_p, w.DWORD, w.DWORD,
+                                                        ctypes.POINTER(ctypes.c_size_t)]
+        k.UpdateProcThreadAttribute.argtypes = [ctypes.c_void_p, w.DWORD, ctypes.c_size_t, ctypes.c_void_p,
+                                                ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p]
+        k.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+        k.CreateProcessW.argtypes = [w.LPCWSTR, w.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, w.BOOL,
+                                     w.DWORD, ctypes.c_void_p, w.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p]
+        k.ReadFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+        k.WriteFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+        k.CloseHandle.argtypes = [w.HANDLE]
+        k.WaitForSingleObject.argtypes = [w.HANDLE, w.DWORD]
+        k.WaitForSingleObject.restype = w.DWORD
+        k.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+
+        in_read, in_write, out_read, out_write = w.HANDLE(), w.HANDLE(), w.HANDLE(), w.HANDLE()
+        if not k.CreatePipe(ctypes.byref(in_read), ctypes.byref(in_write), None, 0) or \
+                not k.CreatePipe(ctypes.byref(out_read), ctypes.byref(out_write), None, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.hpc = w.HANDLE()
+        result = k.CreatePseudoConsole(COORD(cols, rows), in_read, out_write, 0, ctypes.byref(self.hpc))
+        k.CloseHandle(in_read)      # the pseudo console holds its own copies
+        k.CloseHandle(out_write)
+        if result != 0:
+            k.CloseHandle(in_write)
+            k.CloseHandle(out_read)
+            raise OSError("CreatePseudoConsole failed (0x%08x)" % (result & 0xFFFFFFFF))
+        self.in_write, self.out_read = in_write, out_read
+        self._console_open = True
+        self._lock = threading.Lock()
+
+        size = ctypes.c_size_t(0)
+        k.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+        attrs = ctypes.create_string_buffer(size.value)
+        proc = PROCESS_INFORMATION()
+        try:
+            if not k.InitializeProcThreadAttributeList(attrs, 1, 0, ctypes.byref(size)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if not k.UpdateProcThreadAttribute(attrs, 0, self.PSEUDOCONSOLE, self.hpc,
+                                                   ctypes.sizeof(w.HANDLE), None, None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                info = STARTUPINFOEXW()
+                info.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
+                # no std handles of ours (the worker's may be pipes): the shell
+                # talks only to the pseudo console
+                info.StartupInfo.dwFlags = self.STARTF_USESTDHANDLES
+                info.lpAttributeList = ctypes.addressof(attrs)
+                line = ctypes.create_unicode_buffer(cmdline)
+                if not k.CreateProcessW(None, line, None, None, False, self.EXTENDED_STARTUPINFO_PRESENT,
+                                        None, cwd, ctypes.byref(info), ctypes.byref(proc)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                k.DeleteProcThreadAttributeList(attrs)
+        except Exception:
+            self._close_console()
+            k.CloseHandle(in_write)
+            k.CloseHandle(out_read)
+            raise
+        self.hprocess, self.pid = proc.hProcess, proc.dwProcessId
+        k.CloseHandle(proc.hThread)
+        # the console keeps the output pipe open after the shell exits: close it
+        # then, so read() sees the end
+        watcher = threading.Thread(target=self._watch, name="conpty-wait")
+        watcher.daemon = True
+        watcher.start()
+
+    def _watch(self):
+        self.k32.WaitForSingleObject(self.hprocess, 0xFFFFFFFF)
+        self._close_console()
+
+    def _close_console(self):
+        with self._lock:
+            if not self._console_open:
+                return
+            self._console_open = False
+        self.k32.ClosePseudoConsole(self.hpc)
+
+    def read(self):
+        buf = self.ct.create_string_buffer(65536)
+        got = self.ct.c_ulong(0)
+        if not self.k32.ReadFile(self.out_read, buf, 65536, self.ct.byref(got), None) or not got.value:
+            return b""
+        return buf.raw[:got.value]
+
+    def write(self, data):
+        got = self.ct.c_ulong(0)
+        while data:
+            if not self.k32.WriteFile(self.in_write, data, len(data), self.ct.byref(got), None):
+                return
+            data = data[got.value:]
+
+    def resize(self, cols, rows):
+        with self._lock:
+            if self._console_open:
+                self.k32.ResizePseudoConsole(self.hpc, self.COORD(cols, rows))
+
+    def poll(self):
+        if self.k32.WaitForSingleObject(self.hprocess, 0) != 0:
+            return None
+        code = self.ct.c_ulong(0)
+        self.k32.GetExitCodeProcess(self.hprocess, self.ct.byref(code))
+        return int(code.value)
+
+    def wait(self, timeout=None):
+        ms = 0xFFFFFFFF if timeout is None else int(timeout * 1000)
+        self.k32.WaitForSingleObject(self.hprocess, ms)
+        return self.poll()
+
+    def kill(self):
+        self._close_console()   # ends every program attached to it
+        if self.poll() is None:
+            kill_tree(self)
+
+    def release(self):
+        for handle in (self.in_write, self.out_read, self.hprocess):
+            try:
+                self.k32.CloseHandle(handle)
+            except Exception:
+                pass
+
+
 class TerminalSession(object):
-    def __init__(self, worker, session_id, shell=None):
+    """A shell on a device.  Line mode: plain pipes (the dashboard sends whole lines).
+    Full mode (``pty``): a pseudo-terminal of ``cols`` x ``rows``, keystrokes in and
+    the screen's escape codes out, for xterm.js on the dashboard."""
+
+    def __init__(self, worker, session_id, shell=None, pty=False, cols=80, rows=24):
         self.worker = worker
         self.id = str(session_id)
         self.shell = shell or default_shell()
+        self.pty = bool(pty)
+        self.cols, self.rows = clamp_size(cols, rows)
         self.proc = None
+        self.term = None
         self.closed = False
         self.buf = bytearray()
         self.lock = threading.Lock()
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def start(self):
-        cmd = [self.shell]
-        self.proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, bufsize=0, cwd=os.path.expanduser("~"),
-            **popen_kwargs())
+        home = os.path.expanduser("~")
+        if self.pty:
+            if IS_WINDOWS:
+                self.term = self.proc = WinConPty(self.shell, self.cols, self.rows, home)
+            else:
+                self.term = PosixPty([self.shell], self.cols, self.rows, home)
+                self.proc = self.term.proc
+        else:
+            self.proc = subprocess.Popen(
+                [self.shell], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, bufsize=0, cwd=home,
+                **popen_kwargs())
         for target, name in ((self._read_loop, "term-rd"), (self._flush_loop, "term-fl")):
             thread = threading.Thread(target=target, name=name + self.id)
             thread.daemon = True
@@ -2879,24 +3214,50 @@ class TerminalSession(object):
             return
         try:
             text = data if isinstance(data, bytes) else str(data).encode("utf-8")
-            self.proc.stdin.write(text)
-            self.proc.stdin.flush()
+            if self.term is not None:
+                self.term.write(text)
+            else:
+                self.proc.stdin.write(text)
+                self.proc.stdin.flush()
         except Exception as exc:
             dbg("term write failed: %s" % exc)
 
+    def resize(self, cols, rows, redraw=False):
+        """New window size.  ``redraw``: make the program paint its screen again even
+        when the size didn't change (a page that comes back), by a brief one-row
+        change: the terminal then tells the program, as for any resize."""
+        cols, rows = clamp_size(cols, rows)
+        same = (cols, rows) == (self.cols, self.rows)
+        self.cols, self.rows = cols, rows
+        if self.term is None:
+            return
+        try:
+            if redraw and same:
+                self.term.resize(cols, rows - 1 if rows > TERM_ROWS[0] else rows + 1)
+                time.sleep(0.05)
+            self.term.resize(cols, rows)
+        except Exception as exc:
+            dbg("term resize failed: %s" % exc)
+
     def close(self):
         self.closed = True
-        kill_tree(self.proc)
+        if self.term is not None:
+            self.term.kill()
+        else:
+            kill_tree(self.proc)
 
     def _read_loop(self):
-        fd = None
-        try:
-            fd = self.proc.stdout.fileno()
-        except Exception:
-            return
+        if self.term is not None:
+            read = self.term.read
+        else:
+            try:
+                fd = self.proc.stdout.fileno()
+            except Exception:
+                return
+            read = lambda: os.read(fd, 4096)  # noqa: E731
         while True:
             try:
-                chunk = os.read(fd, 4096)
+                chunk = read()
             except Exception:
                 break
             if not chunk:
@@ -2906,21 +3267,25 @@ class TerminalSession(object):
         self._finish()
 
     def _flush_loop(self):
+        pause = 0.02 if self.pty else 0.05   # typing in a full terminal wants its echo quickly
         while not self.closed:
-            time.sleep(0.05)
+            time.sleep(pause)
             self._flush()
             if self.proc is not None and self.proc.poll() is not None:
                 time.sleep(0.1)
                 self._flush()
                 return
 
-    def _flush(self):
+    def _flush(self, final=False):
         with self.lock:
-            if not self.buf:
+            if not self.buf and not final:
                 return
             data = bytes(self.buf)
             self.buf = bytearray()
-        text = data.decode("utf-8", "replace")
+        # a character split across two reads is decoded whole
+        text = self.decoder.decode(data, final)
+        if not text:
+            return
         try:
             self.worker.http.call("POST", "/api/w/term/%s/output" % self.id,
                                   {"data": text}, timeout=20.0)
@@ -2928,7 +3293,7 @@ class TerminalSession(object):
             dbg("term output post failed: %s" % exc)
 
     def _finish(self):
-        self._flush()
+        self._flush(final=True)
         if self.closed and self.proc is None:
             return
         code = None
@@ -2939,6 +3304,8 @@ class TerminalSession(object):
         except Exception:
             code = -1
         self.closed = True
+        if self.term is not None:
+            self.term.release()
         try:
             self.worker.http.call("POST", "/api/w/term/%s/closed" % self.id,
                                   {"exit_code": code}, timeout=20.0)
@@ -3754,6 +4121,70 @@ class Outbox(object):
 # worker
 # --------------------------------------------------------------------------
 
+class Updater(object):
+    """This worker updating itself (SPEC 8.4).
+
+    The coordinator offers its own worker.py by SHA-256 while this device is
+    idle.  The file comes over the connection this worker already trusts (the
+    cluster's CA), must match the hash and must start on this device's Python
+    before it replaces this one; the old file stays as worker.py.bak.  Then the
+    worker stops (without leaving the cluster) and main() starts it again."""
+
+    def __init__(self, worker, path=None, running=None):
+        self.worker = worker
+        self.path = path or WORKER_FILE
+        self.running = running or SELF_SHA256
+        self.failed = set()   # versions that did not install here: not tried again
+
+    def offer(self, cmd):
+        want = str(cmd.get("sha256") or "").lower()
+        if not want or want == self.running or want in self.failed:
+            return False
+        reason = self.worker.busy_reason()
+        if reason:
+            dbg("update to %s waits: %s" % (want[:12], reason))
+            return False
+        try:
+            self.install(want)
+        except Exception as exc:
+            self.failed.add(want)
+            warn("update to %s failed, keeping this version: %s" % (want[:12], exc))
+            return False
+        log("worker.py updated to %s: restarting" % want[:12])
+        self.worker.restart_after_update = True
+        self.worker.stopping = True
+        return True
+
+    def install(self, want):
+        if file_sha256(self.path) == want:
+            return  # already on disk (the PC's own worker runs the project's file)
+        status, data = self.worker.http.request("GET", "/worker.py", timeout=120.0)
+        if status != 200:
+            raise ValueError("the PC answered HTTP %s" % status)
+        got = hashlib.sha256(data).hexdigest()
+        if got != want:
+            raise ValueError("the download does not match (%s, expected %s)" % (got[:12], want[:12]))
+        new = self.path + ".new"
+        with open(new, "wb") as handle:
+            handle.write(data)
+        try:
+            proc = subprocess.Popen([sys.executable, new, "--version"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+            try:
+                out = proc.communicate(timeout=120)[0].decode("utf-8", "replace")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise ValueError("the new version did not start within 2 minutes")
+            if proc.returncode != 0 or "phonecluster-worker" not in out:
+                raise ValueError("the new version does not start here: %s" % out.strip()[-300:])
+            shutil.copyfile(self.path, self.path + ".bak")
+            os.replace(new, self.path)
+        finally:
+            if os.path.exists(new):
+                os.remove(new)
+
+
 class Worker(object):
     def __init__(self, url, pin=None, name=None, slots=None, state_dir=None, join_code=None):
         self.state_dir = mkdirs(os.path.abspath(state_dir or DEFAULT_STATE_DIR))
@@ -3795,6 +4226,8 @@ class Worker(object):
         self.cache_mb = 500
         self.paused = False
         self.stopping = False
+        self.restart_after_update = False
+        self.updater = Updater(self)
         self.bench_ran = False
         self.work_dir = os.path.join(self.state_dir, "work")
         shutil.rmtree(self.work_dir, ignore_errors=True)  # orphans from a crash
@@ -3966,6 +4399,7 @@ class Worker(object):
         self.join_code = None  # used up
         self._save_tls(resp.get("tls") or {})
         self.device_id = resp.get("device_id") or self.device_id
+        self.name = resp.get("name") or self.name  # a name given on the dashboard wins
         token = resp.get("token")
         if token:
             self.token = token
@@ -4244,6 +4678,8 @@ class Worker(object):
             self.cmd_term_open(cmd)
         elif kind == "term_input":
             self.cmd_term_input(cmd)
+        elif kind == "term_resize":
+            self.cmd_term_resize(cmd)
         elif kind == "term_close":
             self.cmd_term_close(cmd)
         elif kind == "notify":
@@ -4264,8 +4700,21 @@ class Worker(object):
         elif kind == "shutdown":
             log("shutdown requested by coordinator")
             self.stopping = True
+        elif kind == "update":
+            self.updater.offer(cmd)
         else:
             warn("unknown command: %r" % (kind,))
+
+    def busy_reason(self):
+        """Why this worker should not restart now, or None when it is idle."""
+        with self._task_lock:
+            if self.tasks:
+                return "%d task(s) running" % len(self.tasks)
+        if self.terminals:
+            return "a terminal is open"
+        if self.peers.server is not None:
+            return "sending a file to another device"
+        return None
 
     def cmd_task(self, task):
         task_id = str(task.get("id") or "")
@@ -4430,11 +4879,14 @@ class Worker(object):
         sid = str(cmd.get("session_id") or "")
         if not sid or sid in self.terminals:
             return
-        session = TerminalSession(self, sid, cmd.get("shell"))
+        full = bool(cmd.get("pty")) and pty_supported()
+        session = TerminalSession(self, sid, cmd.get("shell"), pty=full,
+                                  cols=cmd.get("cols"), rows=cmd.get("rows"))
         self.terminals[sid] = session
         try:
             session.start()
-            log("terminal %s opened (%s)" % (sid, session.shell))
+            log("terminal %s opened (%s%s)" % (
+                sid, session.shell, ", %dx%d" % (session.cols, session.rows) if full else ""))
         except Exception as exc:
             warn("term_open failed: %s" % exc)
             self.terminals.pop(sid, None)
@@ -4448,6 +4900,11 @@ class Worker(object):
         session = self.terminals.get(str(cmd.get("session_id") or ""))
         if session:
             session.write(cmd.get("data") or "")
+
+    def cmd_term_resize(self, cmd):
+        session = self.terminals.get(str(cmd.get("session_id") or ""))
+        if session:
+            session.resize(cmd.get("cols"), cmd.get("rows"), bool(cmd.get("redraw")))
 
     def cmd_term_close(self, cmd):
         session = self.terminals.get(str(cmd.get("session_id") or ""))
@@ -4544,7 +5001,10 @@ class Worker(object):
                 self._connect_failures = 0
                 if self.outbox.count():
                     self.outbox.replay_async()
-                for cmd in (resp.get("commands") or []):
+                # an update comes last: a task in the same answer keeps this worker busy
+                commands = sorted(resp.get("commands") or [],
+                                  key=lambda c: (c or {}).get("cmd") == "update")
+                for cmd in commands:
                     if self.stopping:
                         break
                     try:
@@ -4589,7 +5049,8 @@ class Worker(object):
                 if isinstance(exc, ApiError) and exc.status >= 500:
                     continue
                 registered = registered and not isinstance(exc, ApiError)
-        self.shutdown(send_leave=True)
+        # restarting after an update is not leaving: the device stays online meanwhile
+        self.shutdown(send_leave=not self.restart_after_update)
 
     def shutdown(self, send_leave=True):
         with self._shutdown_lock:
@@ -4754,11 +5215,57 @@ def main(argv=None):
         except (ValueError, OSError):
             pass
     try:
-        return worker.run()
+        code = worker.run()
     except KeyboardInterrupt:
         log("interrupted")
         worker.shutdown(send_leave=True)
         return 0
+    if worker.restart_after_update:
+        return restart_process()
+    return code
+
+
+def restart_args(argv):
+    """The command line again, without the join code (used up when this device joined)."""
+    out, skip = [], False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg == "--join":
+            skip = True
+        elif not arg.startswith("--join="):
+            out.append(arg)
+    return out
+
+
+def restart_process(argv=None):
+    """Start the (new) worker.py again with the same options (SPEC 8.4).
+
+    A launcher that set PC_SUPERVISED (the PC's own worker, start-worker.cmd)
+    starts it again on RESTART_CODE.  Elsewhere the new file replaces this
+    process (os.execv); on Windows, where execv would leave the console, it
+    runs as a child of this one instead."""
+    os.environ.pop("PC_JOIN_CODE", None)
+    if os.environ.get("PC_SUPERVISED"):
+        return RESTART_CODE
+    command = [sys.executable, "-u"]
+    if getattr(sys.flags, "utf8_mode", 0):
+        command += ["-X", "utf8"]
+    command += [WORKER_FILE] + restart_args(sys.argv[1:] if argv is None else argv)
+    log("starting the new worker.py")
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    if IS_WINDOWS:
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C is the new worker's to handle
+        except (ValueError, OSError):
+            pass
+        return subprocess.call(command)
+    os.execv(sys.executable, command)
+    return 0  # pragma: no cover - execv does not return
 
 
 if __name__ == "__main__":

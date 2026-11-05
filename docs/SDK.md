@@ -254,7 +254,7 @@ on any failure** (2 for bad arguments, 130 on Ctrl+C).
 | `storage list\|put <path> [--scheme auto\|copies\|ec] [--replication N]\|get <id> <dest>\|rm <id>\|status <id>` | the list shows each blob's protection (e.g. `3+1 erasure coded`, `2 copies`) |
 | `schedules list\|add <name> "<cron>" <jobspec.json>\|rm <id>\|run <id>` | |
 | `templates list\|save <name> <jobspec.json>\|rm <id>` | |
-| `terminal <device>` | line-oriented remote shell over the dashboard WebSocket |
+| `terminal <device>` | line-oriented remote shell over the dashboard WebSocket (the dashboard's Terminal page also has a full terminal for htop, vim and the like) |
 | `stats` · `events [--limit N] [--kind K]` · `plugins` · `bench [device] [--wait]` | |
 
 `--param k=v` parses the value as JSON when it can (`count=1000` → int, `prefix="0000"` →

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,7 @@ from .auth import require_pin
 from .db import new_id, now
 from .models import ScheduleCreate, SchedulePatch, TemplateCreate
 from .schedules import CronError, next_run, validate
+from .storage import StorageError
 
 log = logging.getLogger("coordinator.api.files")
 
@@ -206,6 +208,59 @@ async def delete_blob(request: Request, blob_id: str) -> Dict[str, Any]:
     if not await state.storage.delete(blob_id):
         raise HTTPException(status_code=404, detail="no such blob")
     return {"ok": True, "id": blob_id}
+
+
+# --------------------------------------------------------------------------
+# saving into data/downloads (the dashboard's Save buttons, SPEC §10)
+# --------------------------------------------------------------------------
+
+async def _asked_name(request: Request, default: str) -> str:
+    """The name the dashboard asked for (``{"name": ...}``), else ``default``."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict) and body.get("name"):
+        return str(body["name"])
+    return default
+
+
+@router.post("/files/{file_id}/save")
+async def save_file(request: Request, file_id: str) -> Dict[str, Any]:
+    state = _state(request)
+    meta = state.files.meta(file_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="no such file")
+    source = state.files.path_for(file_id)
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="the file's data is missing from the file store")
+    name = await _asked_name(request, str(meta.get("name") or file_id))
+
+    def copy(handle: Any) -> None:
+        with open(source, "rb") as src:
+            shutil.copyfileobj(src, handle, BLOCK)
+
+    return await state.downloads.save(name, copy)
+
+
+@router.post("/storage/{blob_id}/save")
+async def save_blob(request: Request, blob_id: str) -> Dict[str, Any]:
+    """Read a pooled file back from the phones straight into data/downloads."""
+    state = _state(request)
+    blob = state.db.get("blobs", blob_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="no such blob")
+    try:
+        return await state.downloads.save_stream(str(blob.get("name") or blob_id), state.storage.stream(blob_id))
+    except StorageError as exc:
+        raise HTTPException(status_code=409, detail="could not read it back from the phones: %s" % exc)
+
+
+@router.post("/downloads/open")
+async def open_downloads(request: Request) -> Dict[str, Any]:
+    """Show data/downloads on the PC (``{"name"}`` selects that file)."""
+    name = await _asked_name(request, "")
+    return await asyncio.to_thread(_state(request).downloads.show, name or None)
 
 
 # --------------------------------------------------------------------------

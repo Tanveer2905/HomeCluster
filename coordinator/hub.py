@@ -2,7 +2,8 @@
 
 Server -> client: ``snapshot``, ``device``, ``devices``, ``job``, ``task``,
 ``log``, ``event``, ``term``, ``term_closed``, ``stats``.
-Client -> server: ``sub_logs``, ``unsub_logs``, ``term_input``.
+Client -> server: ``sub_logs``, ``unsub_logs``, ``term_input``, ``term_resize``,
+``term_keep_open``.
 """
 
 from __future__ import annotations
@@ -162,5 +163,14 @@ class Hub:
             self.state.terminals.input(
                 str(message.get("session_id") or ""), str(message.get("data") or "")
             )
+        elif op == "term_resize":
+            self.state.terminals.resize(
+                str(message.get("session_id") or ""), message.get("cols"), message.get("rows"),
+                bool(message.get("redraw")),
+            )
+        elif op == "term_keep_open":
+            ids = message.get("session_ids")
+            if isinstance(ids, list):
+                self.state.terminals.keep_open(ids[:64])
         elif op == "ping":
             await conn.send({"ev": "pong"})

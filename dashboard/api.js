@@ -251,7 +251,15 @@
     });
   };
 
-  api.openTerminal = function (deviceId) { return api.post('/terminal', { device_id: deviceId }); };
+  /* opts: {pty: true, cols, rows} asks for a full terminal; the answer's `pty` says what it got */
+  api.openTerminal = function (deviceId, opts) {
+    var body = { device_id: deviceId };
+    if (opts && opts.pty) { body.pty = true; body.cols = opts.cols; body.rows = opts.rows; }
+    return api.post('/terminal', body);
+  };
+  api.resizeTerminal = function (sid, cols, rows, redraw) {
+    return api.post('/terminal/' + encodeURIComponent(sid) + '/resize', { cols: cols, rows: rows, redraw: !!redraw });
+  };
   api.closeTerminal = function (sid) { return api.del('/terminal/' + encodeURIComponent(sid)); };
   api.terminalScrollback = function (sid) { return api.get('/terminal/' + encodeURIComponent(sid)); };
   api.terminals = function () { return api.get('/terminal').then(function (r) { return PC.asList(r, 'sessions'); }); };
@@ -310,29 +318,24 @@
   api.upload = upload;
 
   /**
-   * Download through fetch so the X-Pin header is sent even when cookies are blocked,
-   * then hand the blob to a temporary <a download>.
+   * Save into the project's data\downloads folder: the PC writes the file itself, so nothing
+   * goes to the browser's Downloads folder and a big file never passes through this page.
+   * path: '/files/<id>/save', '/storage/<id>/save' or '/jobs/<id>/export/save?format=zip'.
    */
-  api.download = function (path, filename) {
-    var t = PC.toast('Preparing download…', 'info', 60000);
-    return PC.request(path, { raw: true }).then(function (res) {
-      var name = filename;
-      var cd = res.headers.get('Content-Disposition') || '';
-      var m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
-      if (!name && m) { try { name = decodeURIComponent(m[1]); } catch (e) { name = m[1]; } }
-      return res.blob().then(function (blob) {
-        var url = URL.createObjectURL(blob);
-        var a = PC.h('a', { href: url, download: name || 'download' });
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
-        if (t && t.parentNode) t.parentNode.removeChild(t);
-        PC.ok('Downloaded ' + (name || ''));
-      });
+  api.save = function (path, name) {
+    var t = PC.toast('Saving ' + (name || '') + ' into data\\downloads…', 'info', 3600000);
+    return api.post(path, name ? { name: name } : {}).then(function (r) {
+      if (t && t.parentNode) t.parentNode.removeChild(t);
+      PC.toast('Saved data\\downloads\\' + r.name + ' (' + PC.fmtBytes(r.size) + ')', 'ok', 8000,
+        { label: 'Open folder', onClick: function () { api.openDownloads(r.name); } });
+      return r;
     }).catch(function (e) {
       if (t && t.parentNode) t.parentNode.removeChild(t);
       PC.err(e);
     });
+  };
+  api.openDownloads = function (name) {
+    return api.post('/downloads/open', name ? { name: name } : {}).catch(PC.err);
   };
 
   PC.api = api;

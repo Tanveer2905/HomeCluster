@@ -889,6 +889,125 @@ async def test_terminal_open_input_and_close(client: Any, device: FakeDevice, cl
     assert cluster.terminals.input(session_id, "x") is False
 
 
+async def test_full_terminal_open_resize_and_input(
+    client: Any, make_device: Any, cluster: Any
+) -> None:
+    """A full terminal (SPEC §10): size on open, resize, keystrokes not echoed by us."""
+    device = await make_device(name="pty-dev", caps=["python", "shell", "pty"])
+    opened = await client.post("/api/terminal", json={
+        "device_id": device.device_id, "pty": True, "cols": 9999, "rows": 33})
+    assert opened.status_code == 200
+    body = opened.json()
+    assert body["pty"] is True and (body["cols"], body["rows"]) == (500, 33)
+    session_id = body["session_id"]
+    assert (await device.poll())[0] == {
+        "cmd": "term_open", "session_id": session_id, "shell": None,
+        "pty": True, "cols": 500, "rows": 33}
+
+    # keystrokes go out as typed; the terminal echoes them, so nothing is added here
+    assert cluster.terminals.input(session_id, "l") is True
+    assert (await device.poll())[0]["data"] == "l"
+    await device.term_output(session_id, "l")
+    assert cluster.terminals.get(session_id).buffer == ["l"]
+
+    resized = await client.post("/api/terminal/%s/resize" % session_id,
+                                json={"cols": 120, "rows": 40, "redraw": True})
+    assert resized.status_code == 200 and resized.json()["cols"] == 120
+    assert (await device.poll())[0] == {
+        "cmd": "term_resize", "session_id": session_id, "cols": 120, "rows": 40, "redraw": True}
+    assert (await client.get("/api/terminal/%s" % session_id)).json()["rows"] == 40
+    assert (await client.post("/api/terminal/nope/resize",
+                              json={"cols": 80, "rows": 24})).status_code == 404
+
+    # the dashboard's WebSocket op does the same
+    await cluster.hub.handle_client_message(None, json.dumps(
+        {"op": "term_resize", "session_id": session_id, "cols": "90", "rows": 1}))
+    assert (await device.poll())[0] == {
+        "cmd": "term_resize", "session_id": session_id, "cols": 90, "rows": 2}
+
+
+async def test_full_terminal_needs_the_worker_capability(
+    client: Any, device: FakeDevice, cluster: Any
+) -> None:
+    """An older worker (no "pty") gets a line session; the answer says so."""
+    opened = await client.post("/api/terminal", json={
+        "device_id": device.device_id, "pty": True, "cols": 100, "rows": 30})
+    assert opened.status_code == 200 and opened.json()["pty"] is False
+    session_id = opened.json()["session_id"]
+    command = (await device.poll())[0]
+    assert command["cmd"] == "term_open" and "pty" not in command
+    response = await client.post("/api/terminal/%s/resize" % session_id,
+                                 json={"cols": 80, "rows": 24})
+    assert response.status_code == 400
+
+
+async def test_full_terminal_scrollback_is_capped_by_size(make_device: Any, cluster: Any) -> None:
+    from coordinator.terminal import MAX_PTY_SCROLLBACK
+
+    device = await make_device(name="pty-dev2", caps=["python", "shell", "pty"])
+    session = cluster.terminals.open(device.device_id, pty=True)
+    screen = "\x1b[H" + "x" * 9999
+    for _ in range(60):
+        session.append(screen)
+    view = session.scrollback()
+    assert len(view["output"]) <= MAX_PTY_SCROLLBACK
+    assert view["output"].endswith(screen)
+    assert view["pos"] == 60 * len(screen)
+
+
+async def test_several_terminals_run_side_by_side(
+    client: Any, make_device: Any, cluster: Any, monkeypatch: Any
+) -> None:
+    """Terminals on two devices, and two on one, keep separate output (SPEC §10)."""
+    sent: List[Dict[str, Any]] = []
+
+    async def capture(message: Dict[str, Any]) -> None:
+        sent.append(message)
+
+    monkeypatch.setattr(cluster.hub, "broadcast", capture)
+    first = await make_device(name="one", caps=["python", "shell", "pty"])
+    second = await make_device(name="two", caps=["python", "shell", "pty"])
+    ids = []
+    for device in (first, second, second):
+        opened = await client.post("/api/terminal", json={
+            "device_id": device.device_id, "pty": True, "cols": 80, "rows": 24})
+        assert opened.status_code == 200
+        ids.append(opened.json()["session_id"])
+    assert len(set(ids)) == 3
+    await first.term_output(ids[0], "on one")
+    await second.term_output(ids[1], "on two")
+    await second.term_output(ids[2], "on two again")
+    outputs = [(await client.get("/api/terminal/%s" % sid)).json()["output"] for sid in ids]
+    assert outputs == ["on one", "on two", "on two again"]
+    assert sorted(m["session_id"] for m in sent if m.get("ev") == "term") == sorted(ids)
+    # closing one leaves the others running
+    assert (await client.delete("/api/terminal/%s" % ids[1])).status_code == 200
+    assert sorted(s["session_id"] for s in (await client.get("/api/terminal")).json()) == sorted(
+        [ids[0], ids[2]])
+
+
+async def test_a_terminal_kept_open_by_a_page_is_not_closed_as_idle(
+    device: FakeDevice, cluster: Any
+) -> None:
+    """The idle timer only runs once no dashboard tab has the terminal open (SPEC §10)."""
+    import time as _time
+
+    kept = cluster.terminals.open(device.device_id)
+    left = cluster.terminals.open(device.device_id)
+    long_ago = _time.time() - 3600
+    kept.last = left.last = long_ago
+
+    # the dashboard's WebSocket op; junk and unknown ids are ignored
+    await cluster.hub.handle_client_message(None, json.dumps(
+        {"op": "term_keep_open", "session_ids": [kept.id, "nope", 7]}))
+    await cluster.hub.handle_client_message(None, json.dumps(
+        {"op": "term_keep_open", "session_ids": "not a list"}))
+    assert kept.last > long_ago and left.last == long_ago
+    assert cluster.terminals.reap() == [left.id]
+    assert cluster.terminals.get(kept.id) is not None
+    assert cluster.terminals.keep_open([left.id]) == 0
+
+
 async def test_terminal_errors(client: Any, make_device: Any) -> None:
     assert (await client.post("/api/terminal", json={"device_id": "nope"})).status_code == 404
     browser = await make_device(name="chrome", platform="browser", caps=["js", "browser"])

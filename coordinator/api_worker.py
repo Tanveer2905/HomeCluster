@@ -119,11 +119,21 @@ async def register(request: Request, body: RegisterRequest) -> Dict[str, Any]:
     else:
         device_id = device["id"]
         was_offline = device.get("status") != "online"
+        # a name a person chose (on the dashboard, or on the device itself) wins over
+        # the one a worker reports when it joins again after a restart or update
+        settings = dict(device.get("settings") or {})
+        if body.rename and body.name:
+            name, settings["name_set"] = body.name, True
+        elif settings.get("name_set"):
+            name = device.get("name")
+        else:
+            name = body.name or device.get("name")
         state.db.update(
             "devices",
             {"id": device_id},
             {
-                "name": body.name or device.get("name"),
+                "name": name,
+                "settings": settings,
                 "platform": body.platform or device.get("platform"),
                 "caps": caps or device.get("caps") or [],
                 "info": info or device.get("info") or {},
@@ -138,11 +148,13 @@ async def register(request: Request, body: RegisterRequest) -> Dict[str, Any]:
             )
         device = state.db.get("devices", device_id) or {}
 
+    state.updates.registered(device_id, info)
     state.publish_device(device_id)
     state.scheduler.wake()
     response: Dict[str, Any] = {
         "device_id": device_id,
         "token": token,
+        "name": device.get("name"),   # the name the cluster knows it by
         "config": {
             "poll_timeout": state.config.poll_timeout,
             "offline_after": state.config.offline_after,
@@ -194,6 +206,11 @@ async def poll(
     state.publish_device(device["id"])
     state.scheduler.wake()
 
+    # an idle worker with an older worker.py gets the update on its own: anything
+    # queued meanwhile waits here for the restarted worker (SPEC 8.4)
+    update = state.updates.command_for(device, running)
+    if update is not None:
+        return {"commands": [update]}
     queue = state.queue_for(device["id"])
     commands: List[Dict[str, Any]] = []
     timeout = float(state.config.poll_timeout)
@@ -206,7 +223,10 @@ async def poll(
             commands.append(queue.get_nowait())
         except asyncio.QueueEmpty:
             break
-    return {"commands": commands}
+    answer: Dict[str, Any] = {"commands": commands}
+    if device.get("platform") == "browser":
+        answer["page"] = state.updates.page_version()  # a changed page reloads itself when idle
+    return answer
 
 
 @router.post("/leave")

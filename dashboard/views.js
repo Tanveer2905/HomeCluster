@@ -190,6 +190,17 @@
       }, trust.benched ? 'wrong answers: no jobs' : trust.state === 'checking more' ? 'checking more' :
         'trusted ' + Math.round((trust.score || 0) * 100) + '%');
     }
+    // workers that update themselves (SPEC 8.4): only shown while not up to date
+    var upd = d.update || {};
+    var updateChip = null;
+    if (upd.state === 'by_hand') {
+      updateChip = h('span', { class: 'chip warn', title: 'This worker.py is from before self-updates. Fetch it once more ' +
+        'by hand (run its join command again, or download /worker.py over it); after that it updates itself.' }, 'update by hand once');
+    } else if (upd.state === 'waiting') {
+      updateChip = h('span', { class: 'chip', title: 'It updates as soon as it is idle (' + (upd.reason || 'busy') + ')' }, 'update waiting');
+    } else if (upd.state === 'due' || upd.state === 'updating') {
+      updateChip = h('span', { class: 'chip', title: 'Fetching the new worker.py and restarting' }, 'updating…');
+    }
     var limitsTxt = 'CPU ' + (limits.cpu_pct || 100) + '% (' + (control.job_slots || '?') + ' tasks, ' + (control.threads || '?') + ' model threads)' +
       ' · memory ' + (limits.mem_pct || 70) + '% (' + PC.fmtBytes((control.usable_mem_mb || 0) * 1048576) + ' for models)' +
       (gpu ? ' · GPU ' + limits.gpu_pct + '% (' + PC.fmtBytes((control.gpu_budget_mb || 0) * 1048576) + ')' : '');
@@ -205,6 +216,7 @@
         h('span', { class: 'chip' + (resting ? ' warn' : '') }, 'temp ' + (d.temp === null || d.temp === undefined ? '-' : PC.fmtNum(d.temp, 1) + ' °C')),
         gpuChip,
         trustChip,
+        updateChip,
         h('span', { class: 'chip' }, 'tasks ' + slotsTxt),
         h('span', { class: 'chip' }, 'score ' + (d.bench_score === null || d.bench_score === undefined ? '-' : PC.fmtNum(d.bench_score, 2))),
         d.storage_free_mb !== null && d.storage_free_mb !== undefined ? h('span', { class: 'chip' }, 'free ' + PC.fmtBytes(d.storage_free_mb * 1024 * 1024)) : null),
@@ -765,6 +777,15 @@
               j.finished ? h('span', {}, ' · finished ', PC.timeEl(j.finished)) : '')),
           PC.badge(j.status)));
         summary.appendChild(progressBar(j));
+        if (j.expired) {
+          // SPEC 9.10: an old job keeps only its final result (Settings: clean up finished jobs after)
+          summary.appendChild(h('p', { class: 'muted small' }, 'An old job: its tasks, logs and files were removed ',
+            PC.timeEl(j.expired), '; only the final result is kept.'));
+        } else if (j.cleaned) {
+          // SPEC 9.10: an hour after a job succeeded only its final result is kept
+          summary.appendChild(h('p', { class: 'muted small' }, 'The tasks\' own results and in-between files were cleaned ',
+            PC.timeEl(j.cleaned), '; the final result and its files are kept.'));
+        }
         var dyn = j.progress_units || (j.options || {})._dynamic;
         summary.appendChild(h('div', { class: 'muted small' },
           (j.done_tasks || 0) + ' done · ' + (j.failed_tasks || 0) + ' failed · ' + (j.total_tasks || 0) +
@@ -800,8 +821,8 @@
         }
         ['json', 'csv', 'zip'].forEach(function (fmt) {
           actions.appendChild(h('button', {
-            class: 'btn btn-sm',
-            onclick: function () { PC.api.download('/jobs/' + encodeURIComponent(id) + '/export?format=' + fmt, 'job-' + PC.shortId(id) + '.' + fmt); }
+            class: 'btn btn-sm', title: 'Save the export into data\\downloads',
+            onclick: function () { PC.api.save('/jobs/' + encodeURIComponent(id) + '/export/save?format=' + fmt); }
           }, 'Export ' + fmt));
         });
         actions.appendChild(h('button', {
@@ -860,9 +881,9 @@
           list.appendChild(h('li', { class: 'row gap between' },
             h('span', {}, h('code', {}, '#' + x.task.idx), ' ', o.name || o.file_id, ' ', h('span', { class: 'muted' }, PC.fmtBytes(o.size))),
             h('button', {
-              class: 'btn btn-sm',
-              onclick: function () { PC.api.download('/files/' + encodeURIComponent(o.file_id) + '/download', o.name); }
-            }, 'Download')));
+              class: 'btn btn-sm', title: 'Save into data\\downloads',
+              onclick: function () { PC.api.save('/files/' + encodeURIComponent(o.file_id) + '/save', o.name); }
+            }, 'Save')));
         });
         outputsBox.appendChild(list);
       }

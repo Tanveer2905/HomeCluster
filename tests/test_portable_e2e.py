@@ -191,6 +191,23 @@ def test_a_failing_program_reports_its_exit(api: httpx.Client, workers: Any) -> 
     assert done["status"] == "failed" and "exports no function 'missing'" in done["error"]
 
 
+@needs_wasmtime
+def test_built_in_number_crunching_runs_as_webassembly(api: httpx.Client, workers: Any) -> None:
+    """prime_range and monte_carlo_pi offer WebAssembly; workers with wasmtime use it."""
+    job = api.post("/api/jobs", json={"type": "prime_range", "params": {"start": 2, "end": 3000000}}).json()
+    done = wait_job(api, job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert done["result"] == {"count": 216816}  # primes below three million
+    tasks = [t for t in api.get("/api/jobs/%s/tasks" % job["id"]).json() if t["status"] == "done"]
+    assert tasks and all(t["impl"] == "wasm" for t in tasks)
+    job = api.post("/api/jobs", json={"type": "monte_carlo_pi", "params": {"samples": 4000000}}).json()
+    done = wait_job(api, job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert done["result"]["samples"] == 4000000 and abs(done["result"]["pi"] - 3.14159) < 0.01
+    tasks = [t for t in api.get("/api/jobs/%s/tasks" % job["id"]).json() if t["status"] == "done"]
+    assert tasks and all(t["impl"] == "wasm" for t in tasks)
+
+
 def test_a_big_input_comes_from_the_worker_that_has_it(api: httpx.Client, server: Any, workers: Any) -> None:
     data = os.urandom(int(6.5 * MB))
     big = upload(api, "dataset.bin", data)
@@ -271,6 +288,45 @@ def wait_output(run: SimpleNamespace, text: str, seconds: float) -> None:
 def stop_tree(run: SimpleNamespace) -> None:
     subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True)
     run.proc.wait(timeout=30)
+
+
+def test_a_worker_with_an_older_file_updates_itself(server: Any, tmp_path: Path) -> None:
+    """SPEC 8.4: the PC offers its worker.py, the worker swaps it in and comes back."""
+    import hashlib
+
+    folder = tmp_path / "phone"
+    folder.mkdir()
+    mine = folder / "worker.py"
+    original = WORKER.read_bytes()
+    mine.write_bytes(original + b"\n# an older version\n")
+    old = mine.read_bytes()
+    code = server.cluster.security.codes.create("e2e-update")
+    env = dict(os.environ)
+    for name in ("PC_PIN", "PC_JOIN_CODE", "PC_STATE_DIR", "PC_URL", "PC_SUPERVISED", "PC_ROOT"):
+        env.pop(name, None)
+    run = run_logged([sys.executable, "-u", str(mine), "--url", server.url, "--join", code["code"],
+                      "--ca", str(server.tls.ca_pem), "--state-dir", str(folder / "state"),
+                      "--name", "updater", "--verbose"], env=env, cwd=str(folder))
+    try:
+        wait_output(run, "worker.py updated to", 90)
+        wait_output(run, "starting the new worker.py", 30)
+        (row,) = server.cluster.db.select("join_codes", "WHERE note='e2e-update'")
+        deadline = time.time() + 60
+        while time.time() < deadline and not server.cluster.db.select(
+                "events", "WHERE kind='worker_updated' AND device_id=?", (row["device_id"],)):
+            time.sleep(0.25)
+        device = server.cluster.db.get("devices", row["device_id"])
+        assert device["info"]["worker_sha256"] == hashlib.sha256(original).hexdigest(), "".join(run.lines)[-3000:]
+        assert server.cluster.updates.view(device) == {"state": "current"}
+    finally:
+        if sys.platform == "win32":
+            stop_tree(run)
+        else:
+            run.proc.terminate()
+            run.proc.wait(timeout=30)
+    assert mine.read_bytes() == original and (folder / "worker.py.bak").read_bytes() == old
+    # it came back as the same device, without its used-up join code
+    assert len(server.cluster.db.select("devices", "WHERE name='updater'")) == 1
 
 
 @pytest.mark.skipif(sys.platform != "win32" or not (ROOT / "tools" / "python" / "python.exe").is_file(),

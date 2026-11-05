@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from ._wasm_kernels import kernel, wasm_impl
 
 TYPE = "prime_range"
 DESCRIPTION = "Count the primes in [start, end) across the cluster"
@@ -87,14 +89,21 @@ def _bounds(params: Dict[str, Any]) -> Any:
     return start, end
 
 
-def _payload(params: Dict[str, Any], options: Dict[str, Any], lo: int, hi: int) -> Dict[str, Any]:
+def _payload(params: Dict[str, Any], options: Dict[str, Any], lo: int, hi: int,
+             module: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     args = {"start": lo, "end": hi, "return_list": bool(params.get("return_list"))}
+    impls: Dict[str, Any] = {
+        "python": {"code": WORKER_PY, "entry": "run", "args": args},
+        "js": {"code": WORKER_JS, "entry": "run", "args": args},
+    }
+    inputs: List[str] = []
+    if module is not None and not args["return_list"]:
+        # where wasmtime is ready the count comes from WebAssembly, many times faster
+        impls["wasm"] = wasm_impl(module, [max(2, lo), hi])
+        inputs = [module["id"]]
     return {
-        "impls": {
-            "python": {"code": WORKER_PY, "entry": "run", "args": args},
-            "js": {"code": WORKER_JS, "entry": "run", "args": args},
-        },
-        "inputs": [],
+        "impls": impls,
+        "inputs": inputs,
         "timeout": options.get("timeout"),
         "requires": list(options.get("requires") or []),
         "meta": {"start": lo, "end": hi, "units": hi - lo},
@@ -110,23 +119,24 @@ def work(params: Dict[str, Any], options: Dict[str, Any], ctx: Any) -> Any:
     if _fixed_chunk(params, options) > 0:
         return None
     start, end = _bounds(params)
-    return {"units": end - start, "grain": 1000}
+    return {"units": end - start, "grain": 1000, "state": {"module": kernel("count_primes", ctx)}}
 
 
 def piece(params: Dict[str, Any], options: Dict[str, Any], ctx: Any, state: Any,
           lo: int, hi: int) -> Dict[str, Any]:
     start = _bounds(params)[0]
-    return _payload(params, options, start + lo, start + hi)
+    return _payload(params, options, start + lo, start + hi, (state or {}).get("module"))
 
 
 def split(params: Dict[str, Any], options: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
     start, end = _bounds(params)
     chunk = max(1, _fixed_chunk(params, options) or 100000)
+    module = kernel("count_primes", ctx)
     payloads: List[Dict[str, Any]] = []
     lo = start
     while lo < end:
         hi = min(lo + chunk, end)
-        payloads.append(_payload(params, options, lo, hi))
+        payloads.append(_payload(params, options, lo, hi, module))
         lo = hi
     return payloads
 
@@ -136,7 +146,11 @@ def reduce(params: Dict[str, Any], results: List[Dict[str, Any]], ctx: Any) -> A
     primes: List[int] = []
     want_list = bool(params.get("return_list"))
     for item in results:
-        value = item.get("result") or {}
+        value = item.get("result")
+        if isinstance(value, int) and not isinstance(value, bool):
+            count += value  # the WebAssembly version answers with the count alone
+            continue
+        value = value or {}
         if not isinstance(value, dict):
             continue
         count += int(value.get("count") or 0)

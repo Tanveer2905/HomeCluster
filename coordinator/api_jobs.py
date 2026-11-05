@@ -49,6 +49,10 @@ def _clean(job: Dict[str, Any]) -> Dict[str, Any]:
         out["cached"] = options["_cached"]  # answered by an identical earlier job (SPEC 9.8)
     if options.get("_rechecked"):
         out["rechecked"] = options["_rechecked"]  # computed again after a wrong answer (SPEC 9.9)
+    if options.get("_cleaned"):
+        out["cleaned"] = options["_cleaned"]  # in-between data removed, final result kept (SPEC 9.10)
+    if options.get("_expired"):
+        out["expired"] = options["_expired"]  # an old job: only its final result is left (SPEC 9.10)
     for key in list(options):
         if key.startswith("_"):
             options.pop(key)
@@ -245,8 +249,11 @@ async def delete_job(request: Request, job_id: str) -> Dict[str, Any]:
     if job["status"] in ("pending", "running", "waiting"):
         state.scheduler.cancel_job(job_id, "job deleted")
     state.results.discard(job_id)
+    tasks = state.db.select("tasks", "WHERE job_id=?", (job_id,))
     state.db.execute("DELETE FROM tasks WHERE job_id=?", (job_id,))
     state.db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+    # its task logs and the files it made go too, unless something else uses them (SPEC 9.10)
+    await asyncio.to_thread(state.cleanup.forget_job, job, tasks)
     state.hub.publish({"ev": "job", "job": {"id": job_id}, "deleted": True})
     return {"ok": True, "id": job_id}
 
@@ -275,37 +282,59 @@ def _tasks_csv(tasks: List[Dict[str, Any]]) -> str:
     return buffer.getvalue()
 
 
-@router.get("/jobs/{job_id}/export")
-async def export_job(request: Request, job_id: str, format: str = "json") -> Response:
-    state = _state(request)
+EXPORT_TYPES = {"json": "application/json", "csv": "text/csv", "zip": "application/zip"}
+
+
+def _export_parts(state: Any, job_id: str, format: str) -> Any:
+    fmt = (format or "json").lower()
+    if fmt not in EXPORT_TYPES:
+        raise HTTPException(status_code=400, detail="format must be json, csv or zip")
     job = _clean(_job_or_404(state, job_id))
     tasks = state.db.select("tasks", "WHERE job_id=? ORDER BY idx ASC", (job_id,))
     for task in tasks:
         task.pop("payload", None)
-    fmt = (format or "json").lower()
+    return fmt, job, tasks
 
+
+def _export_text(fmt: str, job: Dict[str, Any], tasks: List[Dict[str, Any]]) -> bytes:
     if fmt == "json":
-        body = json.dumps(
-            {"job": job, "tasks": tasks, "result": job.get("result")},
-            indent=2,
-            default=str,
-        ).encode("utf-8")
-        return Response(
-            content=body,
-            media_type="application/json",
-            headers={"Content-Disposition": 'attachment; filename="%s.json"' % job_id},
-        )
-    if fmt == "csv":
-        return Response(
-            content=_tasks_csv(tasks).encode("utf-8"),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="%s.csv"' % job_id},
-        )
-    if fmt != "zip":
-        raise HTTPException(status_code=400, detail="format must be json, csv or zip")
+        return json.dumps({"job": job, "tasks": tasks, "result": job.get("result")},
+                          indent=2, default=str).encode("utf-8")
+    return _tasks_csv(tasks).encode("utf-8")
 
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+
+@router.get("/jobs/{job_id}/export")
+async def export_job(request: Request, job_id: str, format: str = "json") -> Response:
+    state = _state(request)
+    fmt, job, tasks = _export_parts(state, job_id, format)
+    if fmt == "zip":
+        buffer = io.BytesIO()
+        _write_export_zip(state, job, tasks, buffer)
+        body = buffer.getvalue()
+    else:
+        body = _export_text(fmt, job, tasks)
+    return Response(
+        content=body,
+        media_type=EXPORT_TYPES[fmt],
+        headers={"Content-Disposition": 'attachment; filename="%s.%s"' % (job_id, fmt)},
+    )
+
+
+@router.post("/jobs/{job_id}/export/save")
+async def save_export(request: Request, job_id: str, format: str = "json") -> Dict[str, Any]:
+    """The export written straight into data/downloads (the dashboard's Save buttons)."""
+    state = _state(request)
+    fmt, job, tasks = _export_parts(state, job_id, format)
+    name = "%s-%s.%s" % (job.get("name") or "job", job_id[:8], fmt)
+    if fmt == "zip":
+        return await state.downloads.save(name, lambda handle: _write_export_zip(state, job, tasks, handle))
+    body = _export_text(fmt, job, tasks)
+    return await state.downloads.save(name, lambda handle: handle.write(body))
+
+
+def _write_export_zip(state: Any, job: Dict[str, Any], tasks: List[Dict[str, Any]], handle: Any) -> None:
+    """The job, its tasks, logs and output files as a zip; outputs are copied from disk."""
+    with zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
             "result.json",
             json.dumps(
@@ -328,16 +357,12 @@ async def export_job(request: Request, job_id: str, format: str = "json") -> Res
                 if not file_id:
                     continue
                 try:
-                    data = state.files.read(file_id)
-                except (OSError, ValueError):
+                    path = state.files.path_for(file_id)
+                except ValueError:
                     continue
-                name = str(output.get("name") or file_id)
-                archive.writestr("outputs/%s_%s" % (task.get("idx"), name), data)
-    return Response(
-        content=buffer.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="%s.zip"' % job_id},
-    )
+                if path.is_file():
+                    name = str(output.get("name") or file_id)
+                    archive.write(path, "outputs/%s_%s" % (task.get("idx"), name))
 
 
 # --------------------------------------------------------------------------

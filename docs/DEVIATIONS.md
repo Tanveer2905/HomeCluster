@@ -15,15 +15,14 @@ resolve an ambiguity in, `docs/SPEC.md`.
    maintainable. **The coordinator must serve every file in `dashboard/` under
    `/static/<name>`**, not just the three named ones.
 
-2. **Downloads go through `fetch` + a blob URL instead of a plain `<a href>`.**
-   SPEC §3 allows either the `pc_pin` cookie or the `X-Pin` header. A plain link
-   would rely on the cookie only, so the dashboard would break wherever cookies
-   are blocked (the SPEC explicitly wants header auth to work). Every download
-   (`/api/files/{id}/download`, `/api/storage/{id}`, `/api/jobs/{id}/export`)
-   is fetched with `X-Pin`, then handed to a temporary `<a download>`. The
-   filename comes from `Content-Disposition` when present. Note this buffers the
-   whole response in memory — fine for LAN-sized files, but a multi-GB pooled
-   blob will be memory-heavy in the browser.
+2. **The dashboard saves files into `data\downloads` instead of downloading
+   them (changed 2026-11-03, user's choice).** It used to fetch each download
+   with `X-Pin` and hand the whole file to the browser as a blob, so a
+   multi-GB file had to fit in the tab's memory, and it landed in the
+   browser's Downloads folder, outside the project. Now every Save button asks
+   the coordinator to write the file into the project's `data\downloads`
+   itself (SPEC §10), with an **Open folder** button. The GET download
+   routes are unchanged for the SDK, CLI and workers.
 
 3. **Uploads use `XMLHttpRequest`, not `fetch`.**
    Only XHR reports upload progress. The multipart body and the `X-Pin` header
@@ -90,6 +89,70 @@ resolve an ambiguity in, `docs/SPEC.md`.
 
 15. **Unknown WebSocket `ev` values are ignored silently** rather than logged, so
     the coordinator can add events without breaking older dashboard tabs.
+
+16. **Redesign (2026-11-03, user asked; choices: Linear / Vercel direction,
+    light and dark following Windows, bundled fonts, dashboard only).** Only
+    `style.css`, `index.html` and `app.js` changed, and no feature or backend
+    code. Design: near-black / near-white neutrals with one indigo accent, and
+    hairline borders. The navigation is grouped and has hand-drawn line icons.
+    Status shows as dot badges, and the overview numbers sit in one panel. A
+    theme button in the top bar cycles follow-Windows / light / dark (saved
+    as `localStorage.pc_theme`, applied before the first paint).
+    Inter 4.1 and JetBrains Mono 2.304 are in `dashboard/fonts/` (SIL OFL
+    1.1; sources and SHA-256 in its README). `index.html` adds `?v=2` to the
+    CSS and JS addresses: the server sends no cache headers, so browsers
+    could otherwise keep the old stylesheet next to new markup; bump it
+    when they change. Fixed on the way: event kinds now get their colours,
+    since the old stylesheet looked for `kind_…` while the page uses
+    `kind-…`.
+
+17. **Logo (2026-11-04, the user's own artwork, used exactly).** Two images
+    with transparent backgrounds sit in `dashboard/brand/`:
+    `logo-for-light.webp` is the black artwork and `logo-for-dark.webp` the
+    light one. A first SVG redraw did not match them well enough for the
+    user and was replaced.
+    - The sign-in screen (88 px) and the top bar (28 px) show 256 px PNG
+      copies of them, switched by the theme (`.logo-for-light` /
+      `.logo-for-dark`).
+    - `favicon.svg` wraps 64 px copies and shows the one for the browser's
+      light/dark setting.
+    - `scripts/make-brand.ps1` remakes the copies from the two originals
+      with Windows' own codecs. Its WebP decoder drops transparency unless
+      the image is converted to BGRA first, which the script does.
+
+18. **Full terminal on the Terminal page (2026-11-04, Workers 58).** A
+    Full terminal / Line mode choice next to the device; full is the default
+    where the device's worker has `pty`. xterm.js and its fit addon load from
+    `/static/vendor/xterm/` only when a full terminal is first opened, after
+    the bundled JetBrains Mono, so the cells are measured with the right
+    font. Its colours come from the page's code background with a palette
+    for each theme and follow theme changes. Touch screens get a row of Esc,
+    Tab, Ctrl+C/D/Z and arrow keys (arrows follow the program's cursor-key
+    mode); Ctrl+C copies when text is selected. Asset versions went to `?v=6`.
+
+19. **Several terminals, tabs and split view (2026-11-05, user asked; choices:
+    pick 2, 3, more or all, and change what each section shows).** The page
+    held one session; now it holds any number, each its own pane with its own
+    xterm.js or line log.
+    - **Open terminal** adds one; the pickers no longer lock. The toolbar's
+      Close became a × on each tab and section. A running terminal asks first,
+      since closing ends what runs there; one that ended by itself keeps its
+      tab and last screen until dismissed.
+    - **Show** (One / 2 / 3 ... / All) sets the number of sections. "All" also
+      takes in terminals opened later. Rows of an odd count give the last
+      section the rest of the row; below 860 px the sections stack.
+    - Each section has a picker. A terminal already on screen changes places
+      with it; a tab click brings its terminal into the active section.
+    - Panes never move in the page, and those off screen are only invisible,
+      not removed (`visibility: hidden`, not `display: none`). xterm.js keeps
+      its screen, scrollback and scroll position, and needs no re-measuring.
+      They keep their size until shown, so programs are not redrawn for nothing.
+    - A dot on a tab shows new output while it is off screen, ignoring the
+      repaint a replay asks for.
+    - The tab's `sessionStorage` now holds the sessions, sections, active one
+      and view; the older one-session form is still read.
+    - Asset versions are now `?v=7`; `XTERM_V` stays 6, since those files did
+      not change.
 
 ## SDK/CLI (`sdk/phonecluster`, `examples/`, `tests/test_sdk_unit.py`)
 
@@ -722,3 +785,82 @@ resolve an ambiguity in, `docs/SPEC.md`.
     script avoids script modules (`Expand-Archive`, `Get-FileHash`) so it
     also runs under Windows' default "Restricted" script policy; the
     end-to-end test runs it that way.
+52. **Saving into `data\downloads` (SPEC §10, user asked: "save to
+    data\downloads").** New `coordinator/downloads.py` and `POST
+    /api/files/{id}/save`, `/api/storage/{id}/save`,
+    `/api/jobs/{id}/export/save`, `/api/downloads/open` (dashboard item 2).
+    The zip export now copies output files from disk instead of reading each
+    one into memory first. Found on the way: the Services page's Download
+    button called `/api/api/files/...` and never worked; it is a Save button
+    now like the others.
+53. **Workers update themselves (SPEC §8.4, user's choices: automatically
+    when idle, browser tabs too).** Every change to worker.py used to need a
+    trip to each phone (the J2's battery fix). New `coordinator/updates.py`,
+    the `update` command, the worker's `Updater` (hash check, test start,
+    `worker.py.bak`, restart without leaving) and `page` in browsers' poll
+    answers. Restarting needed a launcher: `PC_SUPERVISED=1` + exit code 75
+    for the coordinator's own worker (it now watches and restarts it) and the
+    Windows launchers; `os.execv` on Termux/Linux; a child process on
+    Windows without a launcher. Workers from before this change report no
+    hash and are shown as "update by hand once". A real worker process
+    replacing its own file is in `test_portable_e2e.py`.
+54. **WebAssembly versions of `prime_range` and `monte_carlo_pi` (SPEC §7,
+    user asked for phones to count for more).** Honest expectation, told to
+    the user before building: every device gets much faster (about 60x on
+    the PC), so the phones' share grows only modestly; the J2 (32-bit ARM)
+    has no wasmtime and keeps Python; `hash_search` stays Python because its
+    hashing is already C. The modules are hand-assembled in Python (no
+    compiler; `coordinator/plugins/_wasm_kernels.py`) and checked against an
+    independent prime count up to 10^12. worker.py now prefers the `wasm`
+    impl when a job offers it next to `python` and wasmtime is there or
+    installable, falling back to Python; browsers prefer `js` over `wasm` when
+    both are offered.
+55. **Dashboard names survive restarts (found live 2026-11-03).** A name
+    given with Rename on the dashboard was replaced by the worker's own name
+    ("localhost", the PC's host name) whenever the worker joined again, and
+    self-updates restart workers on every update. A dashboard rename now sets
+    `settings.name_set` and wins on re-attach; the register answer carries
+    `name`, which worker.py and the browser page adopt; the browser page's
+    own Rename sends `rename: true` and still works.
+56. **Only the final result stays (SPEC §9.10, user asked; choices: an hour
+    after success, keep task logs, keep failed/cancelled jobs, keep the
+    reuse store).** Everything used to stay forever: each task's result,
+    progress and input slice, check copies and in-between output files.
+    New `coordinator/cleanup.py` cleans a succeeded job once it can no
+    longer be rechecked. Deleting a job used to leave its logs and files
+    behind; now they go too (files it was given stay, and nothing that
+    another job, template or schedule mentions is deleted, since the file
+    store is content-addressed).
+57. **Old jobs keep only their final result (SPEC §9.10, user's choices:
+    30 days, all finished jobs, keep the result, remove task logs, final
+    output files and older events).** New setting `cleanup.keep_days`
+    (Settings → Automatic, 0 = never); the job list keeps every job with its
+    result, so the history stays readable while the disk does not fill up.
+58. **Full interactive terminals (SPEC §8, §10, §11; user asked, with every
+    tool inside the project).** The SPEC ruled full-screen programs out: the
+    shell ran on pipes and the page sent whole lines. A worker that can now
+    reports `pty` and runs the shell on a pseudo-terminal: Python's own
+    `pty`/`termios` on Termux and Linux, and on Windows the ConPTY pseudo
+    console called through `ctypes`. `pywinpty` was not used: `worker.py`
+    stays one file with the standard library only, and a laptop's lent
+    Python carries no packages. The dashboard runs xterm.js 5.5.0 + its fit
+    addon (MIT), copied into `dashboard/vendor/xterm/` from the npm registry
+    after checking the registry's sha512 (sources and SHA-256 in its
+    README); nothing is installed and nothing comes from the internet when
+    the page runs. New: `term_open` takes `pty`, `cols`, `rows`; a
+    `term_resize` command, `POST /api/terminal/{sid}/resize` and the
+    WebSocket op `term_resize`; sessions report `pty`, `cols`, `rows`. Full
+    terminals keep 256 000 characters of scrollback instead of 400 chunks and
+    don't record `$ <line>` (the terminal's echo is in the output). Workers
+    without `pty` (not yet updated) get a line session, and the Line mode
+    choice stays for anyone who prefers it. The worker's output decoding is
+    now incremental for both kinds, which fixes a character split between two
+    reads turning into two `?`.
+59. **The idle timer waits for the dashboard (SPEC §10, §11, user's choice).**
+    A terminal used to close after 30 minutes without input or output, which
+    with several open would end the ones you had only switched away from. A
+    browser tab that has terminals open now sends `term_keep_open` every
+    minute, on every dashboard page; the timer only runs once no tab has the
+    terminal open. Forgotten shells still get cleaned up, but an open
+    dashboard tab now holds a terminal, and with it that device's automatic
+    worker update, until the terminal is closed.

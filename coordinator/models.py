@@ -64,6 +64,15 @@ class NotifyRequest(_Base):
 # ----------------------------------------------------------------- terminal
 class TerminalOpen(_Base):
     device_id: str
+    pty: bool = False  # a full terminal (htop, vim) when the device's worker has "pty"
+    cols: Optional[int] = None
+    rows: Optional[int] = None
+
+
+class TerminalResize(_Base):
+    cols: int
+    rows: int
+    redraw: bool = False
 
 
 # ---------------------------------------------------------------- schedules
@@ -97,6 +106,7 @@ class SettingsPatch(_Base):
     cache: Optional[Dict[str, Any]] = None
     verify: Optional[Dict[str, Any]] = None
     transfers: Optional[Dict[str, Any]] = None
+    cleanup: Optional[Dict[str, Any]] = None
     pin: Optional[str] = None
 
 
@@ -130,6 +140,8 @@ class RegisterRequest(_Base):
     slots: int = 1
     device_id: Optional[str] = None
     token: Optional[str] = None
+    #: the person renamed it on the device itself (the browser page's Rename): this name wins
+    rename: bool = False
 
 
 class WorkerStatus(_Base):

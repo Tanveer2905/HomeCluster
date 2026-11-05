@@ -141,6 +141,12 @@
     },
     termInput: function (sessionId, data) {
       return ws.send({ op: 'term_input', session_id: sessionId, data: data });
+    },
+    termResize: function (sessionId, cols, rows, redraw) {
+      return ws.send({ op: 'term_resize', session_id: sessionId, cols: cols, rows: rows, redraw: !!redraw });
+    },
+    termKeepOpen: function (sessionIds) {
+      return ws.send({ op: 'term_keep_open', session_ids: sessionIds });
     }
   };
 

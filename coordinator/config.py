@@ -79,6 +79,10 @@ DEFAULTS: Dict[str, Any] = {
         "recheck_minutes": 60,  # a wrong device's work this recent is done again
         "strikes": 3,           # wrong answers within a day before it gets no jobs
     },
+    # only the final result stays (SPEC 9.10)
+    "cleanup": {
+        "keep_days": 30,        # finished jobs older than this keep only their final result; 0 = forever
+    },
     # keeping outsiders out (SPEC 3)
     "security": {
         "join_minutes": 10,     # a join code works once, for this long
@@ -100,7 +104,7 @@ DEFAULTS: Dict[str, Any] = {
 
 #: Keys that ``PATCH /api/settings`` may touch (plus ``pin``).
 EDITABLE_SECTIONS = ("scheduler", "storage", "notifications", "llm", "services",
-                     "cache", "verify", "transfers", "security")
+                     "cache", "verify", "transfers", "security", "cleanup")
 
 
 def root_dir() -> Path:

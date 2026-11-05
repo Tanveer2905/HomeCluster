@@ -9,6 +9,7 @@ pytest.  Run in the project folder with:
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -384,6 +385,76 @@ def test_terminal_echo(cluster):
              what="terminal output")
     fake.push({"cmd": "term_close", "session_id": sid}, device_id)
     wait_for(lambda: sid in fake.term_closed, timeout=30, what="terminal close")
+
+
+def test_full_terminal(cluster):
+    """A shell on a pseudo-terminal (ConPTY on Windows): keystrokes in, the
+    terminal's echo and escape codes out, a size the programs see (SPEC 10)."""
+    fake, _worker, device_id = cluster
+    assert "pty" in fake.registrations[0]["caps"]
+    sid = "term-full"
+    fake.push({"cmd": "term_open", "session_id": sid, "shell": None,
+               "pty": True, "cols": 100, "rows": 30}, device_id)
+    time.sleep(1.0)
+    # Enter is a carriage return in a real terminal
+    fake.push({"cmd": "term_input", "session_id": sid, "data": "echo full-$((6*7))\r"
+               if not IS_WINDOWS else "echo full-%COMPUTERNAME:~0,0%42\r"}, device_id)
+    wait_for(lambda: "full-42" in fake.term_output.get(sid, ""), timeout=30,
+             what="terminal output")
+    fake.push({"cmd": "term_resize", "session_id": sid, "cols": 120, "rows": 40}, device_id)
+    time.sleep(0.5)
+    ask = "mode con\r" if IS_WINDOWS else "stty size\r"
+    fake.push({"cmd": "term_input", "session_id": sid, "data": ask}, device_id)
+    if IS_WINDOWS:
+        wait_for(lambda: re.search(r"Columns:\s+120", fake.term_output.get(sid, "")),
+                 timeout=30, what="new width")
+    else:
+        wait_for(lambda: "40 120" in fake.term_output.get(sid, ""), timeout=30, what="new size")
+    fake.push({"cmd": "term_input", "session_id": sid, "data": "exit 3\r"}, device_id)
+    wait_for(lambda: sid in fake.term_closed, timeout=30, what="terminal exit")
+    assert fake.term_closed[sid] == 3
+
+
+def test_full_terminal_close_ends_a_running_program(cluster):
+    fake, _worker, device_id = cluster
+    sid = "term-busy"
+    fake.push({"cmd": "term_open", "session_id": sid, "pty": True, "cols": 80, "rows": 24}, device_id)
+    time.sleep(1.0)
+    busy = "ping -n 60 127.0.0.1\r" if IS_WINDOWS else "sleep 60\r"
+    fake.push({"cmd": "term_input", "session_id": sid, "data": busy}, device_id)
+    time.sleep(1.0)
+    fake.push({"cmd": "term_close", "session_id": sid}, device_id)
+    wait_for(lambda: sid in fake.term_closed, timeout=20, what="terminal close")
+
+
+def test_terminal_size_is_clamped(w):
+    assert w.clamp_size(None, None) == (80, 24)
+    assert w.clamp_size("132", 50) == (132, 50)
+    assert w.clamp_size(1, 1) == (w.TERM_COLS[0], w.TERM_ROWS[0])
+    assert w.clamp_size(10 ** 6, 10 ** 6) == (w.TERM_COLS[1], w.TERM_ROWS[1])
+    assert w.clamp_size("wide", []) == (80, 24)
+
+
+def test_terminal_output_keeps_split_characters_whole(w):
+    """A character cut in two by a read reaches the page whole, not as two '?'."""
+    posts = []
+
+    class Http(object):
+        def call(self, method, path, body, timeout=None):
+            posts.append(body["data"])
+
+    class Worker(object):
+        http = Http()
+
+    session = w.TerminalSession(Worker(), "t1")
+    text = "héllo ── \U0001F600"
+    raw = text.encode("utf-8")
+    for i in range(len(raw)):
+        session.buf.extend(raw[i:i + 1])
+        session._flush()
+    session._flush(final=True)
+    assert "".join(posts) == text
+    assert all("�" not in p for p in posts)
 
 
 def test_benchmark_command(cluster):
@@ -1466,6 +1537,7 @@ def test_detect_caps(w, tmp_path):
     assert "python" in caps and "shell" in caps
     assert w.platform_tag() in caps
     assert len(caps) == len(set(caps))
+    assert ("pty" in caps) == w.pty_supported()
     if w.IS_WINDOWS:
         assert "windows" in caps
     # tmp_path lives on a real disk, so >= 200 MB free is expected here

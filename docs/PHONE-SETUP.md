@@ -149,6 +149,27 @@ The laptop connects out to the PC; it needs no firewall change. When it first pa
 Windows may ask whether `python.exe` may accept connections: **Allow** (Private networks) lets the other devices fetch
 from it directly; **Cancel** is fine too, they then fetch from the PC instead.
 
+## Updates
+
+Workers update themselves. When `worker/worker.py` on the PC changes, every phone, laptop and the PC's own worker
+fetches the new copy as soon as it is idle, checks it, keeps the old one as `worker.py.bak` and restarts within a few
+seconds; it stays joined. A device that is busy (a task, a model or service, an open terminal) waits until it is idle.
+Browser tabs reload themselves when the PC has a newer worker page.
+
+A worker from before this feature can't do that yet: its card on the Devices page says **update by hand once**.
+Fetch worker.py over the old one, then start it again; from then on it updates itself:
+
+1. Stop the worker (Ctrl+C in Termux or its terminal).
+2. From the Join page's Termux one-liner, copy two things: the `sha256//…` key (it proves the file comes from your
+   PC) and the PC's address (the `https://…:8765` part). Put both into this command, replacing `KEY` and `ADDRESS`:
+
+   ```sh
+   cd ~/phonecluster && curl -fsSk --max-time 60 --pinnedpubkey "KEY" ADDRESS/worker.py -o worker.py
+   ```
+
+3. Start it again: `python worker.py` on Termux, `python3 worker.py` on Linux (the J2). It keeps its saved place in
+   the cluster.
+
 ## Removing a phone
 
 Close Termux (or press Ctrl+C in it) or close the browser tab. The dashboard shows it offline within 30 seconds and

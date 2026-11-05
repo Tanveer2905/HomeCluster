@@ -8,7 +8,7 @@ from __future__ import annotations
 
 __all__ = ["VERSION", "create_app"]
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def create_app(data_dir=None):  # type: ignore[no-untyped-def]

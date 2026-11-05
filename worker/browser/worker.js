@@ -386,14 +386,15 @@ function putFile(name, buffer) {
 
 /* A new device joins with a one-time code from the PC's Join page (SPEC 3);
    afterwards it re-attaches with its saved device id + token. */
-function register(code) {
+function register(code, renamed) {
   var body = {
     join_code: code ? code : null,
     name: state.name,
     platform: 'browser',
     caps: capsList(),
     info: deviceInfo(),
-    slots: state.slots
+    slots: state.slots,
+    rename: !!renamed  /* the person renamed it here: this name wins over the dashboard's */
   };
   if (state.device_id && state.token) {
     body.device_id = state.device_id;
@@ -405,6 +406,7 @@ function register(code) {
     var config = res.config ? res.config : {};
     if (config.poll_timeout) { state.pollTimeout = config.poll_timeout; }
     if (config.log_batch_ms) { state.logBatchMs = config.log_batch_ms; }
+    if (res.name) { state.name = res.name; }  /* a name given on the dashboard wins */
     saveDevice();
     stamp('registered as ' + state.name);
     if (!res.bench_done && !register._benched) {
@@ -693,7 +695,8 @@ function startTask(task) {
   setState('running', 'busy');
   stamp('task ' + run.id + ' started');
 
-  if (impls.wasm && capsList().indexOf('wasm') >= 0) {
+  // jobs that offer JavaScript too keep it here: the browser compiles it to native code anyway
+  if (impls.wasm && !impls.js && capsList().indexOf('wasm') >= 0) {
     startWasmTask(run, payload);
     return;
   }
@@ -960,6 +963,23 @@ function notify(title, body) {
   stamp('notification: ' + text + ' - ' + detail);
 }
 
+/* ------------------------------------------------------ page updates */
+/* The PC sends the version of this page's files with every poll (SPEC 8.4).
+   When it changes, the page reloads itself once it is idle: no task, no
+   service call of its own running.  The saved device keeps it joined. */
+
+function pageChanged(version) {
+  if (!version) { return false; }
+  if (!state.page) { state.page = version; return false; }
+  if (version === state.page || state.current || svc.active) { return false; }
+  stamp('the PC has a newer worker page: reloading');
+  state.reloading = true;
+  state.stopped = true;
+  state.polling = false;
+  setTimeout(function () { location.reload(); }, 500);
+  return true;
+}
+
 /* ----------------------------------------------------------- poll loop */
 
 function statusBlock() {
@@ -988,6 +1008,7 @@ function loop() {
       for (var i = 0; i < commands.length; i++) {
         try { handle(commands[i]); } catch (err) { stamp('command failed: ' + err.message); }
       }
+      if (pageChanged(res.page)) { return; }
       tick();
     }).catch(function (err) {
       if (err.status === 410) { onRemoved(); return; }
@@ -1051,7 +1072,7 @@ function rename() {
   if (!next) { return; }
   state.name = String(next).slice(0, 40);
   renderStatus();
-  register(null).then(function () {
+  register(null, true).then(function () {
     stamp('renamed to ' + state.name);
   }).catch(function (err) {
     stamp('rename failed: ' + (err.message ? err.message : err));
@@ -1413,7 +1434,7 @@ function boot() {
   });
   document.addEventListener('visibilitychange', onVisibility);
   window.addEventListener('pagehide', function () {
-    if (!state.token || state.stopped) { return; }
+    if (!state.token || state.stopped || state.reloading) { return; }
     // keepalive lets the request outlive the page; headers stay per SPEC 8
     try {
       fetch(state.base + '/api/w/leave', {
